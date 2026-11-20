@@ -130,7 +130,7 @@ pub struct PyBridge {
 
 impl PyBridge {
     pub fn spawn() -> Result<Self> {
-        let py_bin = find_python3();
+        let py_bin = find_python_executable();
         let mut child = Command::new(&py_bin)
             .arg("-u")
             .arg("-c")
@@ -458,13 +458,32 @@ fn map_python_error(exc_type: &str, msg: &str) -> RustmakeError {
     }
 }
 
-fn find_python3() -> String {
-    for cand in ["/opt/homebrew/bin/python3", "/usr/bin/python3", "python3"] {
-        if Path::new(cand).exists() || cand == "python3" {
-            return cand.to_string();
+pub fn find_python_executable() -> String {
+    if let Ok(explicit) = std::env::var("RUSTMAKE_PYTHON")
+        && !explicit.is_empty()
+    {
+        return explicit;
+    }
+    #[cfg(windows)]
+    let cands: &[&str] = &["python", "python3", "py"];
+    #[cfg(not(windows))]
+    let cands: &[&str] = &["python3", "/opt/homebrew/bin/python3", "/usr/bin/python3", "python"];
+
+    for cand in cands {
+        if let Ok(out) = Command::new(cand).arg("--version").output()
+            && out.status.success()
+        {
+            return (*cand).to_string();
         }
     }
-    "python3".to_string()
+    #[cfg(windows)]
+    {
+        "python".to_string()
+    }
+    #[cfg(not(windows))]
+    {
+        "python3".to_string()
+    }
 }
 
 fn eval_simple_yte_expr(expr: &str) -> std::result::Result<Value, ()> {

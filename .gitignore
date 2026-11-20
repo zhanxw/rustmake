@@ -22,7 +22,10 @@ __pycache__/
 # Excluded legacy Python Snakemake files in workspace
 /.dockerignore
 /.gitattributes
-/.github/
+/.github/*
+!/.github/workflows/
+/.github/workflows/*
+!/.github/workflows/ci.yml
 /.gitpod.yml
 /.readthedocs.yml
 /.sonarcloud.properties

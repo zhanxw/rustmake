@@ -124,6 +124,8 @@ pub fn simplify_path(path: &str) -> String {
 pub fn normalize_lexical(path: &Path) -> String {
     let mut parts: Vec<String> = Vec::new();
     let is_abs = path.is_absolute();
+    let has_leading_slash = path.to_string_lossy().starts_with('/');
+    let has_prefix = matches!(path.components().next(), Some(std::path::Component::Prefix(_)));
     for comp in path.components() {
         match comp {
             std::path::Component::RootDir => {}
@@ -133,7 +135,7 @@ pub fn normalize_lexical(path: &Path) -> String {
                     && last != ".."
                 {
                     parts.pop();
-                } else if !is_abs {
+                } else if !is_abs && !has_leading_slash {
                     parts.push("..".to_string());
                 }
             }
@@ -145,7 +147,9 @@ pub fn normalize_lexical(path: &Path) -> String {
             }
         }
     }
-    if is_abs {
+    if has_prefix {
+        parts.join("/")
+    } else if is_abs || has_leading_slash {
         format!("/{}", parts.join("/"))
     } else if parts.is_empty() {
         ".".to_string()

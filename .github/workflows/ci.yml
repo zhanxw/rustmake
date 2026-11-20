@@ -1,0 +1,76 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: Build & Test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            artifact_name: rustmake-linux-x86_64
+            bin_path: target/release/rustmake
+          - os: macos-latest
+            artifact_name: rustmake-macos-arm64
+            bin_path: target/release/rustmake
+          - os: windows-latest
+            artifact_name: rustmake-windows-x86_64
+            bin_path: target/release/rustmake.exe
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install Rust stable toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo registry and build artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build release binary
+        shell: bash
+        run: cargo build --release --locked
+
+      - name: Verify CLI version and help
+        shell: bash
+        run: |
+          ./${{ matrix.bin_path }} --version
+          ./${{ matrix.bin_path }} --help >/dev/null
+
+      - name: Run cross-platform unit and lint tests
+        shell: bash
+        run: cargo test --locked --test rust_unit_tests --test rust_lint_tests
+
+      - name: Run example, workflow, and Python test suites (Unix)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          cargo test --locked --test rust_examples_tests --test rust_workflow_tests
+          python3 tests/run_rustmake_tests.py
+
+      - name: Upload release binary artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact_name }}
+          path: ${{ matrix.bin_path }}
+          if-no-files-found: error

@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::io::Read;
+#[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -466,8 +467,15 @@ fn set_readonly_mode(p: &Path) -> Result<()> {
         return Ok(());
     }
     let mut perms = meta.permissions();
-    let mode = perms.mode() & !0o222;
-    perms.set_mode(mode);
+    #[cfg(unix)]
+    {
+        let mode = perms.mode() & !0o222;
+        perms.set_mode(mode);
+    }
+    #[cfg(not(unix))]
+    {
+        perms.set_readonly(true);
+    }
     std::fs::set_permissions(p, perms)?;
     Ok(())
 }
@@ -485,14 +493,22 @@ fn run_shell_command(
         .file_name()
         .and_then(|s| s.to_str())
         .unwrap_or("sh");
+    let base_lower = base.to_ascii_lowercase();
+    let stem = base_lower.strip_suffix(".exe").unwrap_or(&base_lower);
 
     let mut command = Command::new(&exe);
-    match base {
+    match stem {
         "bash" | "zsh" => {
             command.args(["-euo", "pipefail", "-c", cmd]);
         }
         "sh" | "dash" | "ash" => {
             command.args(["-eu", "-c", cmd]);
+        }
+        "cmd" => {
+            command.args(["/C", cmd]);
+        }
+        "powershell" | "pwsh" => {
+            command.args(["-NoProfile", "-Command", cmd]);
         }
         _ => {
             command.args(["-c", cmd]);
@@ -539,14 +555,33 @@ fn run_shell_command(
 
 fn resolve_shell_exec(explicit: Option<&str>) -> String {
     if let Some(e) = explicit {
+        #[cfg(windows)]
+        if e == "bash" && Path::new(r"C:\Program Files\Git\bin\bash.exe").exists() {
+            return r"C:\Program Files\Git\bin\bash.exe".to_string();
+        }
         return e.to_string();
     }
-    for cand in ["/bin/bash", "/opt/homebrew/bin/bash", "/usr/bin/bash"] {
-        if Path::new(cand).exists() {
-            return cand.to_string();
+    #[cfg(windows)]
+    {
+        for cand in [
+            r"C:\Program Files\Git\bin\bash.exe",
+            r"C:\Program Files (x86)\Git\bin\bash.exe",
+        ] {
+            if Path::new(cand).exists() {
+                return cand.to_string();
+            }
         }
+        return "cmd.exe".to_string();
     }
-    "/bin/sh".to_string()
+    #[cfg(not(windows))]
+    {
+        for cand in ["/bin/bash", "/opt/homebrew/bin/bash", "/usr/bin/bash"] {
+            if Path::new(cand).exists() {
+                return cand.to_string();
+            }
+        }
+        "/bin/sh".to_string()
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -604,14 +639,15 @@ fn run_script(
         std::fs::write(&temp_script, script_content)?;
     }
 
-    let (interp, args): (&str, Vec<String>) = match ext {
-        "py" => ("/opt/homebrew/bin/python3", vec![temp_script.to_string_lossy().into_owned()]),
-        "sh" => ("/bin/bash", vec![temp_script.to_string_lossy().into_owned()]),
-        "R" | "r" => ("Rscript", vec![temp_script.to_string_lossy().into_owned()]),
-        _ => ("/opt/homebrew/bin/python3", vec![temp_script.to_string_lossy().into_owned()]),
+    let py_exe = crate::py_bridge::find_python_executable();
+    let (interp, args): (String, Vec<String>) = match ext {
+        "py" => (py_exe, vec![temp_script.to_string_lossy().into_owned()]),
+        "sh" => (resolve_shell_exec(Some("bash")), vec![temp_script.to_string_lossy().into_owned()]),
+        "R" | "r" => ("Rscript".to_string(), vec![temp_script.to_string_lossy().into_owned()]),
+        _ => (py_exe, vec![temp_script.to_string_lossy().into_owned()]),
     };
 
-    let mut cmd = Command::new(interp);
+    let mut cmd = Command::new(&interp);
     cmd.args(&args).current_dir(cwd);
     let mut child = cmd.spawn().map_err(|e| {
         RustmakeError::Rule(format!(
@@ -782,8 +818,7 @@ fn setup_shadow_dir(
                 }
                 let src = entry.path();
                 let dst = shadow_dir.join(&name);
-                #[cfg(unix)]
-                std::os::unix::fs::symlink(&src, &dst)?;
+                create_symlink(&src, &dst)?;
             }
         }
         "minimal" | "copy-minimal" => {
@@ -808,8 +843,7 @@ fn setup_shadow_dir(
                             copy_deref_entry(&src, &dst)?;
                         }
                     } else {
-                        #[cfg(unix)]
-                        std::os::unix::fs::symlink(&src, &dst)?;
+                        create_symlink(&src, &dst)?;
                     }
                 }
             }
@@ -840,6 +874,27 @@ fn setup_shadow_dir(
     Ok(ShadowContext { shadow_dir })
 }
 
+pub(crate) fn create_symlink(target: &Path, dst: &Path) -> Result<()> {
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::symlink(target, dst)?;
+    }
+    #[cfg(windows)]
+    {
+        let resolved = if target.is_relative() {
+            dst.parent().unwrap_or_else(|| Path::new("")).join(target)
+        } else {
+            target.to_path_buf()
+        };
+        if resolved.is_dir() {
+            std::os::windows::fs::symlink_dir(target, dst)?;
+        } else {
+            std::os::windows::fs::symlink_file(target, dst)?;
+        }
+    }
+    Ok(())
+}
+
 fn copy_shadow_entry(src: &Path, dst: &Path) -> Result<()> {
     let meta = std::fs::symlink_metadata(src)?;
     if meta.file_type().is_symlink() {
@@ -849,8 +904,7 @@ fn copy_shadow_entry(src: &Path, dst: &Path) -> Result<()> {
         } else {
             target
         };
-        #[cfg(unix)]
-        std::os::unix::fs::symlink(resolved, dst)?;
+        create_symlink(&resolved, dst)?;
     } else if meta.is_dir() {
         copy_dir_recursive(src, dst)?;
     } else {
@@ -947,8 +1001,7 @@ fn move_or_copy_path(
                 target = compute_rel_path(from_parent, &inner_rel);
             }
         }
-        #[cfg(unix)]
-        std::os::unix::fs::symlink(target, dst)?;
+        create_symlink(&target, dst)?;
         return Ok(());
     }
     if std::fs::rename(src, dst).is_ok() {

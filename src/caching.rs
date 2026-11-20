@@ -115,8 +115,7 @@ pub fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<()> {
         let to = dst.join(entry.file_name());
         if ty.is_symlink() {
             let target = std::fs::read_link(entry.path())?;
-            #[cfg(unix)]
-            std::os::unix::fs::symlink(target, to)?;
+            crate::executor::create_symlink(&target, &to)?;
         } else if ty.is_dir() {
             copy_dir_recursive(&entry.path(), &to)?;
         } else {

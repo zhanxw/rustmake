@@ -238,6 +238,13 @@ fn example_hello_world_dryrun_dag_and_mock_e2e() {
         let mut perms = std::fs::metadata(&curl_path).unwrap().permissions();
         perms.set_mode(0o755);
         std::fs::set_permissions(&curl_path, perms).unwrap();
+
+        let xsv_path = shim_bin.join("xsv");
+        let xsv_script = "#!/bin/sh\nval=\"$4\"\nfile=\"$5\"\nhead -n 1 \"$file\"\ngrep \"^${val},\" \"$file\" || true\n";
+        std::fs::write(&xsv_path, xsv_script).unwrap();
+        let mut xsv_perms = std::fs::metadata(&xsv_path).unwrap().permissions();
+        xsv_perms.set_mode(0o755);
+        std::fs::set_permissions(&xsv_path, xsv_perms).unwrap();
     }
 
     std::fs::write(
