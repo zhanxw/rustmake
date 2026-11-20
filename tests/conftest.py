@@ -1,0 +1,148 @@
+import os
+import platform
+import sys
+import time
+from functools import lru_cache
+import pytest
+from contextlib import suppress
+
+from snakemake.common.constants import ON_WINDOWS
+from snakemake.utils import find_bash_on_windows
+from snakemake.shell import shell
+
+ON_LINUX = sys.platform == "linux"
+ON_MACOS = sys.platform == "darwin"
+ON_APPLE_SILICON = platform.processor() == "arm"
+skip_on_windows = pytest.mark.skipif(ON_WINDOWS, reason="Unix stuff")
+only_on_windows = pytest.mark.skipif(not ON_WINDOWS, reason="Windows stuff")
+skip_on_macos_arm = pytest.mark.skipif(
+    ON_MACOS and ON_APPLE_SILICON,
+    reason="Needed Conda packages not available on macOS Apple silicon",
+)
+skip_on_macos = pytest.mark.skipif(
+    ON_MACOS,
+    reason="Needed Conda packages not installed on macOS",
+)
+needs_strace = pytest.mark.xfail(
+    os.system("strace -o /dev/null true") != 0, reason="Missing strace"
+)
+
+
+@pytest.fixture(autouse=True)
+def reset_paths_between_tests():
+    """Ensure that changes to sys.path are reset between tests"""
+    org_path = sys.path.copy()
+    yield
+    sys.path = org_path
+
+
+bash_cmd = find_bash_on_windows()
+
+if ON_WINDOWS and bash_cmd:
+
+    @pytest.fixture(autouse=True)
+    def prepend_usable_bash_to_path(monkeypatch):
+        monkeypatch.setenv("PATH", os.path.dirname(bash_cmd), prepend=os.pathsep)
+
+    @pytest.fixture(autouse=True)
+    def reset_shell_exec_on_windows(prepend_usable_bash_to_path):
+        shell.executable(None)
+
+
+@pytest.fixture
+def dummy_server(tmp_path, monkeypatch):
+    """Serve the snakemake logo via a local HTTP server.
+
+    Yields the URL of the logo and exposes it to subprocesses via DUMMY_SERVER_URL.
+    """
+    import shutil
+    from .common import dpath, serve_directory
+
+    served = tmp_path / "served"
+    served.mkdir()
+    shutil.copy(dpath("../images/logo.png"), served / "logo.png")
+    with serve_directory(served) as server_url:
+        url = f"{server_url}/logo.png"
+        monkeypatch.setenv("DUMMY_SERVER_URL", url)
+        yield url
+
+
+@pytest.fixture
+def s3_storage():
+    from snakemake_storage_plugin_s3 import StorageProviderSettings
+    from snakemake_interface_common.plugin_registry.plugin import TaggedSettings
+    import uuid
+    import boto3
+    from botocore.config import Config
+
+    endpoint_url = "http://127.0.0.1:9000"
+    access_key = "minio"
+    secret_key = "minio123"
+    bucket = f"snakemake-{uuid.uuid4().hex}"
+
+    # Keep retries and timeouts small in tests so endpoint issues fail fast
+    # instead of appearing as a hang during DAG construction.
+    s3_fast_config = Config(
+        connect_timeout=2,
+        read_timeout=5,
+        retries={"max_attempts": 1, "mode": "standard"},
+    )
+
+    # Wait briefly for MinIO startup in CI and skip locally if unavailable.
+    if not _is_s3_endpoint_ready(endpoint_url, access_key, secret_key):
+        msg = f"S3 endpoint {endpoint_url} is not reachable"
+        if os.getenv("CI"):
+            pytest.fail(msg)
+        pytest.skip(msg)
+
+    tagged_settings = TaggedSettings()
+    tagged_settings.register_settings(
+        StorageProviderSettings(
+            endpoint_url=endpoint_url,
+            access_key=access_key,
+            secret_key=secret_key,
+            retries=1,
+        )
+    )
+
+    yield f"s3://{bucket}", {"s3": tagged_settings}
+
+    # clean up using boto3
+    s3c = boto3.resource(
+        "s3",
+        endpoint_url=endpoint_url,
+        aws_access_key_id=access_key,
+        aws_secret_access_key=secret_key,
+        config=s3_fast_config,
+    )
+    with suppress(Exception):
+        s3c.Bucket(bucket).delete()
+
+
+@lru_cache(maxsize=1)
+def _is_s3_endpoint_ready(endpoint_url, access_key, secret_key):
+    import boto3
+    from botocore.config import Config
+
+    s3_fast_config = Config(
+        connect_timeout=2,
+        read_timeout=5,
+        retries={"max_attempts": 1, "mode": "standard"},
+    )
+
+    s3_client = boto3.client(
+        "s3",
+        endpoint_url=endpoint_url,
+        aws_access_key_id=access_key,
+        aws_secret_access_key=secret_key,
+        config=s3_fast_config,
+    )
+    deadline = time.time() + 30
+    while True:
+        try:
+            s3_client.list_buckets()
+            return True
+        except Exception:
+            if time.time() >= deadline:
+                return False
+            time.sleep(1)

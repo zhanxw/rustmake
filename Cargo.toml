@@ -1,0 +1,55 @@
+[package]
+name = "rustmake"
+version = "0.1.0"
+edition = "2024"
+authors = ["Xiaowei Zhan <zhanxw@gmail.com>"]
+description = "A fast, faithful Rust port of the Snakemake workflow management system"
+license = "MIT"
+repository = "https://github.com/zhanxw/rustmake"
+homepage = "https://github.com/zhanxw/rustmake"
+documentation = "https://docs.rs/rustmake"
+readme = "README.md"
+keywords = ["snakemake", "workflow", "bioinformatics", "pipeline", "build-system"]
+categories = ["command-line-utilities", "science", "development-tools"]
+include = [
+    "/Cargo.toml",
+    "/Cargo.lock",
+    "/LICENSE.md",
+    "/README.md",
+    "/src/**/*.rs",
+    "/src/runtime_shim.py",
+]
+
+[lib]
+name = "rustmake"
+path = "src/lib.rs"
+
+[[bin]]
+name = "rustmake"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1.0.104"
+base64 = "0.22.1"
+chrono = "0.4.45"
+clap = { version = "4.6.9", features = ["derive", "env"] }
+crc32fast = "1.5.5"
+flate2 = "1.1.11"
+glob = "0.3.4"
+hex = "0.4.3"
+indexmap = { version = "2.14.2", features = ["serde"] }
+itertools = "0.14.0"
+libc = "0.2.191"
+md-5 = "0.11.0"
+once_cell = "1.21.4"
+rayon = "1.12.0"
+regex = "1.13.2"
+rusqlite = { version = "0.41.1", default-features = false, features = ["bundled"] }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+sha2 = "0.11.1"
+shlex = "1.3.0"
+sysinfo = "0.31.4"
+tempfile = "3.27.0"
+thiserror = "2.0.21"
+walkdir = "2.5.0"

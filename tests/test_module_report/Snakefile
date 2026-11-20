@@ -1,0 +1,11 @@
+
+module test:
+    snakefile:
+        github("snakemake/snakemake", path="tests/test_report/Snakefile", tag="v6.3.0")
+    config:
+        config
+    replace_prefix: 
+        {"results/": "results/testmodule/"}
+
+
+use rule * from test

@@ -1,0 +1,25 @@
+import platform
+shell.executable("bash")
+
+
+if platform.system() == "Windows":
+    custom_path = ".snakemake/custom/conda/*/Scripts/snakemake.exe"
+else:
+    custom_path = ".snakemake/custom/conda/*/bin/snakemake"
+
+
+rule all:
+    input:
+        expand("test{i}.out", i=range(3))
+
+rule a:
+    output:
+        "test{i}.out"
+    conda:
+        "test-env.yaml"
+    params:
+        custom_path=custom_path
+    shell:
+        "(test -e {params.custom_path} || "
+        "(echo not found {params.custom_path} >&2 && exit 1)) && "
+        "snakemake --version > {output}"

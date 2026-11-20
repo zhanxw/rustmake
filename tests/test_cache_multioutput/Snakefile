@@ -1,0 +1,7 @@
+rule a:
+    output:
+        first="1.txt",
+        second="2.txt",
+    cache: True
+    shell:
+        "touch {output}"

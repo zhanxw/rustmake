@@ -1,0 +1,45 @@
+# Rust / Cargo
+/target/
+**/*.rs.bk
+
+# Runtime metadata directories
+/.snakemake*
+examples/**/.snakemake*
+
+# OS / Editor / Python temp files
+*~
+*.pyc
+__pycache__/
+*.swp
+.DS_Store
+.idea/
+.vscode/
+.venv/
+.pytest_cache/
+.mypy_cache/
+.cache/
+
+# Excluded legacy Python Snakemake files in workspace
+/.dockerignore
+/.gitattributes
+/.github/
+/.gitpod.yml
+/.readthedocs.yml
+/.sonarcloud.properties
+/.test_durations
+/.wci.yml
+/CHANGELOG.md
+/CODE_OF_CONDUCT.md
+/Dockerfile
+/MANIFEST.in
+/apidocs/
+/doc-environment.yml
+/docs/
+/images/
+/misc/
+/pixi.lock
+/playground/
+/pyproject.toml
+/release-please-config.json
+/setup.py
+/src/snakemake/

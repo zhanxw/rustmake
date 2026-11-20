@@ -1,0 +1,7 @@
+rule compress_vcf:
+    input:
+        "test.vcf"
+    output:
+        "test.vcf.gz"
+    wrapper:
+        "v8.1.1/bio/bgzip"

@@ -1,0 +1,3922 @@
+__authors__ = ["Tobias Marschall", "Marcel Martin", "Johannes Köster"]
+__copyright__ = "Copyright 2022, Johannes Köster"
+__email__ = "johannes.koester@uni-due.de"
+__license__ = "MIT"
+
+import hashlib
+import os
+import shutil
+import sys
+import subprocess as sp
+import re
+from pathlib import Path
+import tempfile
+import threading
+import time
+from unittest.mock import AsyncMock, patch
+
+import pytest
+from snakemake.exceptions import ResourceConversionError
+from snakemake.exceptions import ResourceDuplicationError
+from snakemake.io import _IOFile
+from snakemake.persistence.db import DbPersistence
+from snakemake.persistence.file import FilePersistence
+from snakemake.resources import GroupResources, is_ordinary_string, Resources
+from snakemake.scheduling.job_scheduler import JobScheduler
+from snakemake.settings.enums import RerunTrigger, PersistenceBackend
+
+from snakemake.settings.types import Batch, MaxJobsPerTimespan
+from snakemake.shell import shell
+from snakemake.exceptions import AmbiguousRuleException, WorkflowError
+
+sys.path.insert(0, os.path.dirname(__file__))
+
+from .common import run, dpath, connected, prepare_tmpdir, serve_directory, apptainer
+from .conftest import (
+    skip_on_windows,
+    skip_on_macos,
+    only_on_windows,
+    ON_WINDOWS,
+    needs_strace,
+    ON_MACOS,
+)
+
+from snakemake_interface_executor_plugins.settings import (
+    SharedFSUsage,
+)
+
+
+def test_list_untracked():
+    run(dpath("test_list_untracked"))
+
+
+xfail_permissionerror_on_win = (
+    pytest.mark.xfail(raises=PermissionError) if ON_WINDOWS else lambda x: x
+)
+
+
+def test_delete_all_output():
+    run(dpath("test_delete_all_output"))
+
+
+def test_github_issue_14():
+    """Add cleanup_scripts argument to allow the user to keep scripts"""
+    # Return temporary directory for inspection - we should keep scripts here
+    tmpdir = run(dpath("test_github_issue_14"), cleanup=False, cleanup_scripts=False)
+    assert os.listdir(os.path.join(tmpdir, ".snakemake", "scripts"))
+    shutil.rmtree(tmpdir, ignore_errors=ON_WINDOWS)
+
+    # And not here
+    tmpdir = run(dpath("test_github_issue_14"), cleanup=False, cleanup_scripts=True)
+    assert not os.listdir(os.path.join(tmpdir, ".snakemake", "scripts"))
+    shutil.rmtree(tmpdir, ignore_errors=ON_WINDOWS)
+
+
+def test_issue956():
+    run(dpath("test_issue956"))
+
+
+def test_unlock_cli():
+    # run the workflow once to create the .snakemake/locks folder
+    tmpdir = run(dpath("test_unlock"), cleanup=False)
+    locks = os.path.join(tmpdir, ".snakemake", "locks")
+    # the lock directory may be cleaned up automatically by Snakemake,
+    # so ensure there's at least one file inside to simulate a stale lock.
+    os.makedirs(locks, exist_ok=True)
+    lockfile = os.path.join(locks, "dummy.lock")
+    open(lockfile, "w").close()
+    assert os.listdir(locks), "expected at least one lock file"
+
+    # run the CLI unlock command and verify it succeeds
+    sp.run(
+        [sys.executable, "-m", "snakemake", "--unlock"],
+        cwd=tmpdir,
+        check=True,
+    )
+    # after unlocking the locks directory should be removed or empty
+    assert not os.path.exists(locks) or not os.listdir(locks)
+    shutil.rmtree(tmpdir, ignore_errors=ON_WINDOWS)
+
+
+@skip_on_windows
+def test01():
+    run(dpath("test01"))
+
+
+def test02():
+    run(dpath("test02"))
+
+
+def test03():
+    run(dpath("test03"), targets=["test.out"])
+
+
+def test04():
+    run(dpath("test04"), targets=["test.out"])
+
+
+@skip_on_windows  # error: "The filename, directory name, or volume label syntax is incorrect".
+def test05():
+    run(dpath("test05"))
+
+
+def test06():
+    run(dpath("test06"), targets=["test.bla.out"])
+
+
+def test07():
+    run(dpath("test07"), targets=["test.out", "test2.out"])
+
+
+def test08():
+    run(dpath("test08"), targets=["test.out", "test2.out"])
+
+
+def test09():
+    run(dpath("test09"), shouldfail=True)
+
+
+def test10():
+    run(dpath("test10"))
+
+
+def test11():
+    run(dpath("test11"))
+
+
+def test12():
+    run(dpath("test12"))
+
+
+def test13():
+    run(dpath("test13"))
+
+
+# TODO re-enable once cluster-generic plugin is released
+# @skip_on_windows
+# def test_cluster_cancelscript():
+#     outdir = run(
+#         dpath("test_cluster_cancelscript"),
+#         snakefile="Snakefile.nonstandard",
+#         shellcmd=(
+#             "snakemake -j 10 --cluster=./sbatch --cluster-cancel=./scancel.sh "
+#             "--cluster-status=./status.sh -s Snakefile.nonstandard"
+#         ),
+#         shouldfail=True,
+#         cleanup=False,
+#         sigint_after=4,
+#     )
+#     scancel_txt = open("%s/scancel.txt" % outdir).read()
+#     scancel_lines = scancel_txt.splitlines()
+#     assert len(scancel_lines) == 1
+#     assert scancel_lines[0].startswith("cancel")
+#     assert len(scancel_lines[0].split(" ")) == 3
+
+
+# @skip_on_windows
+# def test_cluster_cancelscript_nargs1():
+#     outdir = run(
+#         dpath("test_cluster_cancelscript"),
+#         snakefile="Snakefile.nonstandard",
+#         shellcmd=(
+#             "snakemake -j 10 --cluster=./sbatch --cluster-cancel=./scancel.sh "
+#             "--cluster-status=./status.sh --cluster-cancel-nargs=1 "
+#             "-s Snakefile.nonstandard"
+#         ),
+#         shouldfail=True,
+#         cleanup=False,
+#         sigint_after=4,
+#     )
+#     scancel_txt = open("%s/scancel.txt" % outdir).read()
+#     scancel_lines = scancel_txt.splitlines()
+#     assert len(scancel_lines) == 2
+#     assert scancel_lines[0].startswith("cancel")
+#     assert scancel_lines[1].startswith("cancel")
+#     assert len(scancel_lines[0].split(" ")) == 2
+#     assert len(scancel_lines[1].split(" ")) == 2
+
+
+# @skip_on_windows
+# def test_cluster_statusscript_multi():
+#     os.environ["TESTVAR"] = "test"
+#     run(
+#         dpath("test_cluster_statusscript_multi"),
+#         snakefile="Snakefile.nonstandard",
+#         cluster="./sbatch",
+#         cluster_status="./status.sh",
+#     )
+
+
+def test15():
+    run(dpath("test15"))
+
+
+@skip_on_windows  # OS agnostic
+def test_set_threads():
+    run(
+        dpath("test_set_threads"),
+        shellcmd='snakemake --executor local --set-threads "a=max(input.size, 5)" -c 5 --verbose',
+    )
+
+
+def test_glpk_solver():
+    run(dpath("test_solver"), scheduler_ilp_solver="GLPK_CMD")
+
+
+@skip_on_windows
+def test_coin_solver():
+    run(dpath("test_solver"), scheduler_ilp_solver="COIN_CMD")
+
+
+def test_directory():
+    run(
+        dpath("test_directory"),
+        targets=[
+            "downstream",
+            "symlinked_input",
+            "child_to_input",
+            "not_child_to_other",
+        ],
+    )
+    run(dpath("test_directory"), targets=["file_expecting_dir"], shouldfail=True)
+    run(dpath("test_directory"), targets=["dir_expecting_file"], shouldfail=True)
+    run(dpath("test_directory"), targets=["child_to_other"], shouldfail=True)
+
+
+@skip_on_windows
+def test_directory2():
+    run(
+        dpath("test_directory"),
+        targets=[
+            "downstream",
+            "symlinked_input",
+            "child_to_input",
+            "some/dir-child",
+            "some/shadow",
+        ],
+    )
+
+
+@skip_on_windows  # OS agnostic
+def test_set_resources_complex_profile():
+    run(
+        dpath("test_set_resources_complex"),
+        shellcmd="snakemake -c1 --verbose --profile test-profile",
+    )
+
+
+@skip_on_windows  # OS agnostic
+def test_set_resources_complex_cli():
+    run(
+        dpath("test_set_resources_complex"),
+        shellcmd="snakemake -c1 --verbose --set-resources \"a:slurm_extra='--nice=150 --gres=gpu:1'\"",
+    )
+
+
+def test_ancient():
+    run(dpath("test_ancient"), targets=["D", "C", "old_file"])
+
+
+def test_ancient_cli():
+    run(
+        dpath("test_ancient_cli"),
+        shellcmd="snakemake --consider-ancient A=0 B=x --cores 1",
+    )
+
+
+def test_subpath():
+    run(dpath("test_subpath"))
+
+
+def test_report():
+    run(
+        dpath("test_report"),
+        report="report.html",
+        report_stylesheet="custom-stylesheet.css",
+        check_md5=False,
+    )
+
+
+def test_report_href():
+    run(dpath("test_report_href"))
+
+
+def test_report_zip():
+    run(dpath("test_report_zip"), report="report.zip", check_md5=False)
+
+
+def test_report_dir():
+    run(dpath("test_report_dir"), report="report.zip", check_md5=False)
+
+
+def test_report_display_code():
+    run(dpath("test_report_display_code"), report="report.html", check_md5=False)
+
+
+@pytest.mark.skipif(ON_MACOS, reason="shuf is not available on macOS")
+def test_report_after_run():
+    run(
+        dpath("test_report_after_run"),
+        report="report.html",
+        report_after_run=True,
+        report_stylesheet="custom-stylesheet.css",
+        check_md5=False,
+    )
+
+
+def test_report_metadata():
+    run(
+        dpath("test_report_metadata"),
+        report="report.html",
+        check_md5=False,
+        report_metadata="yte_template.yaml",
+    )
+
+
+def test_report_metadata_nested():
+    run(
+        dpath("test_report_metadata"),
+        report="report.html",
+        report_metadata="yte_template_nested.yaml",
+        check_md5=False,
+        shouldfail=True,
+    )
+
+
+def test_params():
+    run(dpath("test_params"))
+
+
+@pytest.mark.parametrize(
+    "backend, PersistenceClass",
+    [
+        (PersistenceBackend.FILE, FilePersistence),
+        (PersistenceBackend.DB, DbPersistence),
+    ],
+)
+def test_params_outdated_metadata(mocker, tmp_path, backend, PersistenceClass):
+    spy = mocker.spy(PersistenceClass, "has_outdated_metadata")
+
+    workdir = tmp_path / "workdir"
+    shutil.copytree(dpath("test_params_outdated_code"), workdir)
+    snakemake_dir = workdir / ".snakemake"
+
+    db_url = None
+    if backend == PersistenceBackend.DB:
+        from sqlmodel import Session, SQLModel, create_engine
+        from snakemake.persistence.db import MetadataRecordORM
+        import json
+
+        # since we do not have a db in the test dir,
+        # we create one from the single _outdated_ .snakemake/metadata/c29tZWRpci90ZXN0Lm91dA== file,
+        # which is the metadata for the test.out file
+        db_file = tmp_path / "metadata.db"
+        db_url = f"sqlite:///{db_file}"
+        engine = create_engine(db_url)
+        SQLModel.metadata.create_all(engine)
+
+        json_file = snakemake_dir / "metadata" / "c29tZWRpci90ZXN0Lm91dA=="
+        with open(json_file, "r") as f:
+            rec = json.load(f)
+
+        with Session(engine) as session:
+            session.add(
+                MetadataRecordORM(
+                    namespace=str(snakemake_dir.absolute()),
+                    target="somedir/test.out",
+                    **rec,
+                )
+            )
+            session.commit()
+
+    run(
+        path=workdir,
+        targets=["somedir/test.out"],
+        persistence_backend=backend,
+        persistence_backend_db_url=db_url,
+        no_tmpdir=True,
+    )
+
+    assert spy.call_count > 0, f"has_outdated_metadata was not called for {backend}!"
+    assert spy.spy_return == True
+
+
+@pytest.mark.parametrize(
+    "backend, PersistenceClass",
+    [
+        (PersistenceBackend.FILE, FilePersistence),
+        (PersistenceBackend.DB, DbPersistence),
+    ],
+)
+def test_github_issue4240(mocker, tmp_path, backend, PersistenceClass):
+    """Input checksums are computed once per job, not once per output file,
+    while every output record still carries the checksums of all eligible inputs
+    """
+    spy = mocker.spy(_IOFile, "checksum")
+    write_spy = mocker.spy(PersistenceClass, "_write_record")
+    run(
+        dpath("test_github_issue4240"),
+        persistence_backend=backend,
+        persistence_backend_db_url=(
+            f"sqlite:///{tmp_path / 'metadata.db'}"
+            if backend == PersistenceBackend.DB
+            else None
+        ),
+    )
+    # big.txt exceeds the checksum size threshold: it is still checked once,
+    # but no checksum is recorded for it
+    calls = sorted(os.path.basename(call.args[0]) for call in spy.call_args_list)
+    assert calls == ["big.txt", "in0.txt", "in1.txt", "in2.txt"]
+
+    expected = {
+        f"in{i}.txt": "sha256:"
+        + hashlib.sha256(
+            (Path(dpath("test_github_issue4240")) / f"in{i}.txt").read_bytes()
+        ).hexdigest()
+        for i in range(3)
+    }
+    records = {call.args[1]: call.args[2] for call in write_spy.call_args_list}
+    assert sorted(records) == ["big.txt", "out0.txt", "out1.txt", "out2.txt"]
+    for out in ["out0.txt", "out1.txt", "out2.txt"]:
+        assert records[out].input_checksums == expected
+
+
+def test_persistence_backend_db_run_directive_concurrency(tmp_path):
+    workdir = tmp_path / "workdir"
+    shutil.copytree(
+        dpath("test_persistence_backend_db_run_directive_concurrency"), workdir
+    )
+
+    # generate expected output dynamically
+    expected_out_dir = workdir / "expected-results" / "out"
+    expected_out_dir.mkdir(parents=True)
+    for i in range(100):
+        (expected_out_dir / f"{i}.txt").write_text("done")
+
+    db_file = tmp_path / "metadata.db"
+    db_url = f"sqlite:///{db_file}"
+
+    run(
+        path=workdir,
+        tmpdir=workdir,
+        cleanup=False,
+        cores=20,  # not sure this will work in CI, probably gets downscaled?
+        persistence_backend=PersistenceBackend.DB,
+        persistence_backend_db_url=db_url,
+        no_tmpdir=True,
+    )
+
+    from sqlmodel import Session, select, create_engine
+    from snakemake.persistence.db import MetadataRecordORM
+
+    engine = create_engine(db_url)
+    with Session(engine) as session:
+        stmt = select(MetadataRecordORM)
+        records = session.scalars(stmt).all()
+        assert (
+            len(records) == 100
+        ), f"Expected 100 DB records, but found {len(records)}!"
+
+
+def test_same_wildcard():
+    run(dpath("test_same_wildcard"))
+
+
+def test_conditional():
+    run(
+        dpath("test_conditional"),
+        targets="test.out test.0.out test.1.out test.2.out".split(),
+    )
+
+
+def test_unpack_dict():
+    run(dpath("test_unpack_dict"))
+
+
+def test_unpack_list():
+    run(dpath("test_unpack_list"))
+
+
+def test_shell():
+    run(dpath("test_shell"))
+
+
+@skip_on_windows
+def test_temp():
+    run(dpath("test_temp"), targets="test.realigned.bam".split())
+
+
+def test_no_temp():
+    run(dpath("test_no_temp"), shellcmd="snakemake -c1 --no-temp")
+
+
+def test_keyword_list():
+    run(dpath("test_keyword_list"))
+
+
+def test_globwildcards():
+    run(dpath("test_globwildcards"))
+
+
+# inpdependent of OS
+@skip_on_windows
+def test_ioutils():
+    run(dpath("test_ioutils"))
+
+
+def test_local_import():
+    run(dpath("test_local_import"))
+
+
+def test_ruledeps():
+    run(dpath("test_ruledeps"))
+
+
+@connected
+def test_url_include():
+    run(dpath("test_url_include"))
+
+
+def test_touch():
+    run(dpath("test_touch"))
+
+
+def test_touch_flag_with_directories():
+    run(dpath("test_touch_with_directories"), executor="touch")
+
+
+def test_config():
+    run(dpath("test_config"))
+
+
+def test_config_non_json_serializable():
+    run(dpath("test_config"), config={"path_value": Path("data")})
+
+
+def test_update_config():
+    run(dpath("test_update_config"))
+
+
+def test_config_merging():
+    run(
+        dpath("test_config_merging"),
+        shellcmd='snakemake -j 1 --configfile config_cmdline_01.yaml config_cmdline_02.yaml --config "block={bowser: cmdline_bowser}" "block={toad: cmdline_toad}"',
+    )
+
+
+def test_config_replacing():
+    run(
+        dpath("test_config_replacing"),
+        shellcmd='snakemake -j 1 --configfile cli-config.yaml --config "value=value2" --replace-workflow-config',
+    )
+
+
+def test_config_replacing_nocli():
+    run(
+        dpath("test_config_replacing_nocli"),
+        shellcmd="snakemake -j 1 --replace-workflow-config",
+    )
+
+
+def test_wildcard_keyword():
+    run(dpath("test_wildcard_keyword"))
+
+
+@skip_on_windows
+@pytest.mark.skipif(ON_MACOS, reason="Requires the stress-ng package")
+def test_benchmark():
+    run(dpath("test_benchmark"), benchmark_extended=True, check_md5=False)
+
+
+@skip_on_windows
+@pytest.mark.skipif(ON_MACOS, reason="Requires the stress-ng package")
+def test_benchmark_jsonl():
+    run(dpath("test_benchmark_jsonl"), benchmark_extended=True, check_md5=False)
+
+
+def test_temp_expand():
+    run(dpath("test_temp_expand"))
+
+
+def test_wildcard_count_ambiguity():
+    run(dpath("test_wildcard_count_ambiguity"))
+
+
+def test_multiple_includes():
+    run(dpath("test_multiple_includes"))
+
+
+def test_remote_snakefile_multiple_includes():
+    source_dir = dpath("test_multiple_includes")
+    with serve_directory(source_dir) as server_url:
+        run(
+            source_dir,
+            shellcmd=f"snakemake --snakefile {server_url}/Snakefile --cores 1",
+        )
+
+
+def test_name_override():
+    run(dpath("test_name_override"))
+
+
+def test_yaml_config():
+    run(dpath("test_yaml_config"))
+
+
+@pytest.mark.skip(reason="This does not work reliably in CircleCI.")
+def test_symlink_temp():
+    run(dpath("test_symlink_temp"), shouldfail=True)
+
+
+def test_empty_include():
+    run(dpath("test_empty_include"))
+
+
+def test_script_python():
+    tmpdir = run(dpath("test_script_py"), cleanup=False)
+    # update timestamp of script
+    os.utime(os.path.join(tmpdir, "scripts/test_explicit_import.py"))
+    outfile_path = os.path.join(tmpdir, "explicit_import.py.out")
+    outfile_timestamp_orig = os.path.getmtime(outfile_path)
+    # won't update output without trigger CODE
+    run(
+        dpath("test_script_py"),
+        cleanup=False,
+        tmpdir=tmpdir,
+        shellcmd="snakemake -c1 --rerun-triggers mtime",
+    )
+    assert outfile_timestamp_orig == os.path.getmtime(outfile_path)
+    run(
+        dpath("test_script_py"),
+        cleanup=False,
+        tmpdir=tmpdir,
+        shellcmd="snakemake -c1",
+    )
+    assert outfile_timestamp_orig != os.path.getmtime(outfile_path)
+    shutil.rmtree(tmpdir, ignore_errors=ON_WINDOWS)
+
+
+@skip_on_windows  # Test relies on perl
+def test_shadow():
+    run(dpath("test_shadow"))
+
+
+@skip_on_windows
+def test_shadow_copy():
+    run(dpath("test_shadow_copy"))
+
+
+@skip_on_windows  # Symbolic link privileges needed to work
+def test_shadow_prefix():
+    run(dpath("test_shadow_prefix"), shadow_prefix="shadowdir")
+
+
+# TODO add again once generic cluster plugin is released
+# @skip_on_windows
+# def test_shadow_prefix_qsub():
+#     run(dpath("test_shadow_prefix"), shadow_prefix="shadowdir", cluster="./qsub")
+
+
+@skip_on_windows
+def test_shadowed_log():
+    run(dpath("test_shadowed_log"))
+
+
+def test_until():
+    run(
+        dpath("test_until"),
+        until=[
+            "leveltwo_first",  # rule name
+            "leveltwo_second.txt",  # file name
+            "second_wildcard",
+        ],
+    )  # wildcard rule
+
+
+def test_omitfrom():
+    run(
+        dpath("test_omitfrom"),
+        omit_from=[
+            "leveltwo_first",  # rule name
+            "leveltwo_second.txt",  # file name
+            "second_wildcard",
+        ],
+    )  # wildcard rule
+
+
+@skip_on_windows  # paths are different on windows ('/' vs. '\')
+def test_nonstr_params():
+    run(dpath("test_nonstr_params"), benchmark_extended=True)
+
+
+def test_delete_output():
+    run(dpath("test_delete_output"), cores=1)
+
+
+def test_params_pickling():
+    run(dpath("test_params_pickling"))
+
+
+def test_input_generator():
+    run(dpath("test_input_generator"))
+
+
+def test_symlink_time_handling():
+    # See Snakefile for notes on why this fails on some systems
+    if os.utime in os.supports_follow_symlinks:
+        run(dpath("test_symlink_time_handling"))
+
+
+@skip_on_windows
+def test_protected_symlink_output():
+    run(dpath("test_protected_symlink_output"))
+
+
+def test_spaces_in_fnames():
+    run(
+        dpath("test_spaces_in_fnames"),
+        # cluster="./qsub",
+        targets=["test bam file realigned.bam"],
+        printshellcmds=True,
+    )
+
+
+def test_deferred_func_eval():
+    run(dpath("test_deferred_func_eval"))
+
+
+def test_format_params():
+    run(dpath("test_format_params"), check_md5=True)
+
+
+def test_rule_defined_in_for_loop():
+    # issue 257
+    run(dpath("test_rule_defined_in_for_loop"))
+
+
+def test_issue381():
+    run(dpath("test_issue381"))
+
+
+def test_format_wildcards():
+    run(dpath("test_format_wildcards"))
+
+
+def test_with_parentheses():
+    run(dpath("test (with parenthese's)"))
+
+    run(dpath("test_path with spaces"))
+
+
+def test_dup_out_patterns():
+    """Duplicate output patterns should emit an error
+
+    Duplicate output patterns can be detected on the rule level
+    """
+    run(dpath("test_dup_out_patterns"), shouldfail=True)
+
+
+def test_issue2826_failed_binary_logs():
+    """Show how a binary log file crushes `show_logs`
+
+    The log file in this test is a binary file.
+    The `show_failed_logs` is activated by default using `run`,
+    thus `show_logs` will be called at the end of the test.
+    Thus this test will check if `show_logs` is able to handle
+    the binary log file.
+    """
+    run(dpath("test_issue2826_failed_binary_logs"), shouldfail=True)
+
+
+# TODO reactivate once generic cluster executor is properly released
+# @skip_on_windows
+# def test_restartable_job_cmd_exit_1_no_restart():
+#     """Test the restartable job feature on ``exit 1``
+
+#     The shell snippet in the Snakemake file will fail the first time
+#     and succeed the second time.
+#     """
+#     run(
+#         dpath("test_restartable_job_cmd_exit_1"),
+#         cluster="./qsub",
+#         retries=0,
+#         shouldfail=True,
+#     )
+
+
+# TODO reactivate once generic cluster executor is properly released
+# @skip_on_windows
+# def test_restartable_job_cmd_exit_1_one_restart():
+#     # Restarting once is enough
+#     run(
+#         dpath("test_restartable_job_cmd_exit_1"),
+#         cluster="./qsub",
+#         retries=1,
+#         printshellcmds=True,
+#     )
+
+
+# TODO reactivate once generic cluster executor is properly released
+# @skip_on_windows
+# def test_restartable_job_qsub_exit_1():
+#     """Test the restartable job feature when qsub fails
+
+#     The qsub in the subdirectory will fail the first time and succeed the
+#     second time.
+#     """
+#     # Even two consecutive times should fail as files are cleared
+#     run(
+#         dpath("test_restartable_job_qsub_exit_1"),
+#         cluster="./qsub",
+#         retries=0,
+#         shouldfail=True,
+#     )
+#     run(
+#         dpath("test_restartable_job_qsub_exit_1"),
+#         cluster="./qsub",
+#         retries=0,
+#         shouldfail=True,
+#     )
+#     # Restarting once is enough
+#     run(
+#         dpath("test_restartable_job_qsub_exit_1"),
+#         cluster="./qsub",
+#         retries=1,
+#         shouldfail=False,
+#     )
+
+
+def test_threads():
+    run(dpath("test_threads"), cores=20)
+
+
+def test_threads_overwrite():
+    run(dpath("test_threads"), shellcmd="snakemake -c20 --set-threads a='10*2'")
+
+
+def test_threads0():
+    run(dpath("test_threads0"))
+
+
+@skip_on_windows  # no minio deployment on windows implemented in our CI
+@pytest.mark.needs_s3
+def test_default_storage(s3_storage):
+    prefix, settings = s3_storage
+
+    run(
+        dpath("test_default_remote"),
+        cores=1,
+        default_storage_provider="s3",
+        default_storage_prefix=prefix,
+        storage_provider_settings=settings,
+    )
+
+
+@skip_on_windows  # OS-independent
+@pytest.mark.needs_s3
+def test_default_storage_local_job(s3_storage):
+    prefix, settings = s3_storage
+
+    run(
+        dpath("test_default_storage_local_job"),
+        cores=1,
+        default_storage_provider="s3",
+        default_storage_prefix=prefix,
+        storage_provider_settings=settings,
+        cluster="./qsub",
+        shared_fs_usage=set(SharedFSUsage.all()) - {SharedFSUsage.INPUT_OUTPUT},
+    )
+
+
+@skip_on_windows  # no minio deployment on windows implemented in our CI
+@pytest.mark.needs_s3
+def test_storage(s3_storage):
+    prefix, settings = s3_storage
+
+    run(
+        dpath("test_storage"),
+        config={"s3_prefix": prefix},
+        storage_provider_settings=settings,
+    )
+
+
+@skip_on_windows  # no minio deployment on windows implemented in our CI
+@pytest.mark.needs_s3
+def test_storage_output_not_missing_via_unflagged_dependency_edge(s3_storage):
+    """An unflagged consumer edge must not override producer storage semantics."""
+    prefix, settings = s3_storage
+    path = dpath("test_storage_dependency_edge_flags")
+
+    # First invocation materializes producer.txt in S3 and records metadata.
+    tmpdir = run(
+        path,
+        cores=1,
+        config={"s3_prefix": prefix},
+        storage_provider_settings=settings,
+        check_results=False,
+        cleanup=False,
+    )
+    assert tmpdir is not None
+
+    try:
+        assert (tmpdir / "producer.ran").exists()
+
+        # Model a fresh machine/invocation: provenance remains, but the local
+        # storage staging cache does not. Force only the consumer to needrun.
+        shutil.rmtree(tmpdir / ".snakemake" / "storage", ignore_errors=True)
+        (tmpdir / "downstream.txt").unlink()
+
+        # Correct behavior: consumer reruns, producer is recognized as already
+        # present in storage. Buggy behavior: update_needrun() checks the stale
+        # unflagged edge locally, schedules producer again, and producer's
+        # sentinel makes this invocation fail.
+        run(
+            path,
+            cores=1,
+            config={"s3_prefix": prefix},
+            storage_provider_settings=settings,
+            check_results=False,
+            cleanup=False,
+            tmpdir=tmpdir,
+        )
+
+        assert (tmpdir / "downstream.txt").read_text() == "producer\n"
+    finally:
+        shutil.rmtree(tmpdir, ignore_errors=ON_WINDOWS)
+
+
+@skip_on_windows  # no minio deployment on windows implemented in our CI
+@pytest.mark.needs_s3
+def test_storage_call(s3_storage):
+    prefix, settings = s3_storage
+
+    run(
+        dpath("test_storage_call"),
+        config={"s3_prefix": prefix},
+        storage_provider_settings=settings,
+    )
+
+
+# TODO enable once storage directive is implemented
+# def test_storage_directive(s3_storage):
+#     prefix, settings = s3_storage
+
+#     run(
+#         dpath("test_storage_directive"),
+#         config={"s3_prefix": prefix},
+#         storage_provider_settings=settings,
+#     )
+
+
+def test_run_namedlist():
+    run(dpath("test_run_namedlist"))
+
+
+def test_profile_old():
+    run(dpath("test_profile_old"))
+
+    from snakemake.profiles import ProfileConfigFileParser
+
+    grouped_profile = Path(dpath("test_profile_old")) / "config.yaml"
+    with grouped_profile.open("r") as f:
+        parser = ProfileConfigFileParser()
+        result = parser.parse(f)
+        assert result["groups"] == list(["a=grp1", "b=grp1", "c=grp1"])
+        assert result["group-components"] == list(["grp1=5"])
+
+
+def test_profile_new():
+    run(dpath("test_profile_new"))
+
+    from snakemake.profiles import ProfileConfigFileParser
+
+    grouped_profile = Path(dpath("test_profile_new")) / "profile.v9+.yaml"
+    with grouped_profile.open("r") as f:
+        parser = ProfileConfigFileParser()
+        result = parser.parse(f)
+        assert result["groups"] == list(["a=grp1", "b=grp1", "c=grp1"])
+        assert result["group-components"] == list(["grp1=5"])
+
+
+def test_profile_none():
+    run(dpath("test_profile_none"))
+    # this seems to be necessary, so this doesn't persist for other tests
+    os.environ.pop("SNAKEMAKE_PROFILE")
+
+
+# windows doesn't seem to like semicolon-separated multiline `shell:` calls
+@skip_on_windows
+def test_profile_with_env_var():
+    run(dpath("test_profile_with_env_var"))
+    # this seems to be necessary, so this doesn't persist for other tests
+    os.environ.pop("SNAKEMAKE_PROFILE")
+
+
+def test_profile_filename():
+    run(dpath("test_profile_filename"))
+
+
+def test_profile_multiple():
+    run(dpath("test_profile_multiple"))
+
+
+@skip_on_windows
+def test_profile_double_dash():
+    """Test that -- target separator works correctly with --profile (issue #3642)."""
+    run(
+        dpath("test_profile_double_dash"),
+        shellcmd="snakemake -c1 --profile profile -- done.txt",
+    )
+
+
+@skip_on_windows
+@connected
+@apptainer
+def test_container_a():
+    run(
+        dpath("test_singularity"),
+        deployment_method={"container"},
+        container_runtime="apptainer",
+    )
+
+
+@skip_on_windows
+@connected
+@skip_on_macos
+def test_container_cluster():
+    run(
+        dpath("test_singularity"),
+        deployment_method={"container"},
+        cluster="./qsub",
+    )
+
+
+@skip_on_windows
+def test_container_invalid():
+    run(
+        dpath("test_singularity"),
+        targets=["invalid.txt"],
+        deployment_method={"container"},
+        shouldfail=True,
+    )
+
+
+@skip_on_windows
+def test_container_module_invalid():
+    run(
+        dpath("test_singularity_module"),
+        targets=["invalid.txt"],
+        deployment_method={"container"},
+        shouldfail=True,
+    )
+
+
+@skip_on_windows
+@skip_on_macos
+@connected
+def test_container_none():
+    run(dpath("test_singularity_none"), deployment_method={"container"})
+
+
+@skip_on_windows
+@connected
+@apptainer
+def test_container_global():
+    run(
+        dpath("test_singularity_global"),
+        deployment_method={"container"},
+        container_runtime="apptainer",
+    )
+
+
+@skip_on_windows
+@connected
+@apptainer
+def test_container_source_cache():
+    run(
+        dpath("test_singularity_source_cache"),
+        deployment_method={"container"},
+        container_runtime="apptainer",
+    )
+
+
+def test_issue612():
+    run(dpath("test_issue612"), executor="dryrun")
+
+
+def test_bash():
+    run(dpath("test_bash"))
+
+
+def test_inoutput_is_path():
+    run(dpath("test_inoutput_is_path"))
+
+
+def test_log_input():
+    run(dpath("test_log_input"))
+
+
+@skip_on_windows
+@skip_on_macos
+@connected
+def test_cwl_container():
+    run(
+        dpath("test_cwl"),
+        deployment_method={"container"},
+    )
+
+
+def test_issue805():
+    run(dpath("test_issue805"), shouldfail=True)
+
+
+def test_issue823_1():
+    run(dpath("test_issue823_1"))
+
+
+def test_function_f_string():
+    run(dpath("test_function_f_string"), executor="dryrun", check_results=False)
+
+
+def test_function_f_string_newline():
+    run(dpath("test_function_f_string_newline"), executor="dryrun", check_results=False)
+
+
+@skip_on_windows
+def test_issue823_2():
+    run(dpath("test_issue823_2"))
+
+
+@skip_on_windows
+def test_issue823_3():
+    run(dpath("test_issue823_3"))
+
+
+@skip_on_windows
+def test_pathlib():
+    run(dpath("test_pathlib"))
+
+
+def test_pathlib_missing_file():
+    run(dpath("test_pathlib_missing_file"), shouldfail=True)
+
+
+@skip_on_windows
+def test_group_jobs():
+    run(dpath("test_group_jobs"), cluster="./qsub")
+
+
+@skip_on_windows
+def test_group_jobs_attempts():
+    run(dpath("test_group_jobs_attempts"), cluster="./qsub", retries=2)
+
+
+def assert_resources(resources: dict, **expected_resources):
+    for name, expected_value in expected_resources.items():
+        assert (
+            resources.get(name) == expected_value
+        ), f"Resource '{name}' expected to be {expected_value}, but got {resources.get(name)}"
+
+
+@skip_on_windows
+def test_groups_out_of_jobs():
+    run(
+        dpath("test_groups_out_of_jobs"),
+        cluster="./qsub",
+        shouldfail=True,
+    )
+
+
+def test_resource_is_ordinary_string():
+    # Ordinary strings
+    assert is_ordinary_string("hello") is True
+    assert is_ordinary_string("123") is True
+    assert is_ordinary_string("simple_string") is True
+
+    # Strings that are not ordinary
+    assert is_ordinary_string("func_name(arg1, arg2)") is False  # Function call
+    assert is_ordinary_string("{'key': 'value'}") is False  # Dictionary literal
+    assert is_ordinary_string("lambda x: x + 1") is False  # Lambda expression
+    assert is_ordinary_string("2 * input.size") is False  # calculation
+
+    # Non-string inputs
+    assert is_ordinary_string(123) is False  # Integer
+    assert is_ordinary_string(["list", "of", "strings"]) is False  # List
+    assert is_ordinary_string(None) is False  # NoneType
+
+
+@skip_on_windows
+def test_group_jobs_resources(mocker):
+    spy = mocker.spy(GroupResources, "basic_layered")
+    run(
+        dpath("test_group_jobs_resources"),
+        cluster="./qsub",
+        cores=6,
+        resources={"typo": 23, "mem_mb": 60000},
+        group_components={0: 5},
+        default_resources=(["mem_mb=0"]),
+        # cleanup=False
+    )
+    assert_resources(
+        dict(spy.spy_return),
+        _nodes=1,
+        _cores=6,
+        mem="60 GB",
+        mem_mb=60000,
+        mem_mib=57221,
+        runtime=420,
+        fake_res=600,
+        global_res=2000,
+        disk="100 GB",
+        disk_mb=100000,
+        disk_mib=95368,
+    )
+
+
+@skip_on_windows
+def test_resources_can_be_provided_in_mib(mocker):
+    spy = mocker.spy(GroupResources, "basic_layered")
+    run(
+        dpath("test_group_jobs_resources"),
+        cluster="./qsub",
+        cores=6,
+        resources={"typo": 23, "mem_mib": 57221},
+        group_components={0: 5},
+        default_resources=(["mem_mb=0"]),
+    )
+    assert_resources(
+        dict(spy.spy_return),
+        _nodes=1,
+        _cores=6,
+        mem="60 GB",
+        mem_mb=60000,
+        mem_mib=57221,
+        runtime=420,
+        fake_res=600,
+        global_res=2000,
+        disk="100 GB",
+        disk_mb=100000,
+        disk_mib=95368,
+    )
+
+
+@skip_on_windows
+def test_cores_limited_by_global_supply():
+    run(
+        dpath("test_group_jobs_resources"),
+        cores=1,
+    )
+
+
+@skip_on_windows
+def test_global_resources_can_be_human_readable(mocker):
+    spy = mocker.spy(GroupResources, "basic_layered")
+    run(
+        dpath("test_group_jobs_resources"),
+        cluster="./qsub",
+        cores=6,
+        resources={"typo": 23, "mem": "60 Gb"},
+        group_components={0: 5},
+        default_resources=(["mem_mb=0"]),
+    )
+    assert_resources(
+        dict(spy.spy_return),
+        _nodes=1,
+        _cores=6,
+        mem="60 GB",
+        mem_mb=60000,
+        mem_mib=57221,
+        runtime=420,
+        fake_res=600,
+        global_res=2000,
+        disk="100 GB",
+        disk_mb=100000,
+        disk_mib=95368,
+    )
+
+
+@skip_on_windows
+@pytest.mark.parametrize(
+    ["res1", "res2"],
+    [
+        ("mem", "mem_mb"),
+        ("mem", "mem_mib"),
+        ("mem_mb", "mem_mib"),
+        ("disk", "disk_mb"),
+    ],
+)
+def test_resources_cannot_provide_prefixed_and_unprefixed_together(res1, res2):
+    run(
+        dpath("test_group_jobs_resources"),
+        cluster="./qsub",
+        cores=6,
+        resources={"typo": 23, res1: 60000, res2: 20},
+        group_components={0: 5},
+        default_resources=(["mem_mb=0"]),
+        shouldfail=ResourceDuplicationError,
+    )
+
+
+@skip_on_windows
+def test_suffixed_resources_cannot_be_human_readable():
+    with pytest.raises(
+        ResourceConversionError, match="Resource 'mem_mb' must be assigned an int"
+    ):
+        Resources.from_mapping({"mem_mb": "40 Gb"})
+
+
+@skip_on_windows
+def test_group_jobs_resources_with_max_threads(mocker):
+    spy = mocker.spy(GroupResources, "basic_layered")
+    run(
+        dpath("test_group_jobs_resources"),
+        cluster="./qsub",
+        cores=6,
+        resources={"mem_mb": 60000},
+        max_threads=1,
+        group_components={0: 5},
+        default_resources=Resources.parse(
+            ["mem_mb=0"], defaults="full", allow_expressions=True
+        ),
+    )
+    assert_resources(
+        dict(spy.spy_return),
+        _nodes=1,
+        _cores=5,
+        mem="60 GB",
+        mem_mb=60000,
+        mem_mib=57222,
+        runtime=380,
+        fake_res=1200,
+        global_res=3000,
+        disk="150 GB",
+        disk_mb=150000,
+        disk_mib=143052,
+    )
+
+
+@skip_on_windows
+def test_group_jobs_resources_with_limited_resources(mocker):
+    spy = mocker.spy(GroupResources, "basic_layered")
+    run(
+        dpath("test_group_jobs_resources"),
+        cluster="./qsub",
+        cores=5,
+        resources={"mem_mb": 10000},
+        max_threads=1,
+        group_components={0: 5},
+        default_resources=Resources.parse(
+            ["mem_mb=0"], defaults="full", allow_expressions=True
+        ),
+    )
+    assert_resources(
+        dict(spy.spy_return),
+        _nodes=1,
+        _cores=1,
+        mem="10 GB",
+        mem_mb=10000,
+        mem_mib=9537,
+        runtime=700,
+        fake_res=400,
+        global_res=1000,
+        disk="50 GB",
+        disk_mb=50000,
+        disk_mib=47684,
+    )
+
+
+@skip_on_windows
+def test_global_resource_limits_limit_scheduling_of_groups():
+    # Note that in the snakefile, mem_mb is set as global (breaking the default) and
+    # fake_res is set as local
+    # In this test, after the first job is "scheduled", snakemake will continue to
+    # schedule jobs until all resources are consumed. It will then do a cluster status
+    # checked, looking in this test at `./status_failed`, which always returns False
+    # The test will then conclude. Each scheduled job leaves a line of output in the
+    # `qsub.log` file, so we can calculate how many jobs were scheduled.
+    tmp = run(
+        dpath("test_group_jobs_resources"),
+        cluster="./qsub",
+        cluster_status="./status_failed",
+        cores=6,
+        nodes=5,
+        cleanup=False,
+        resources={"typo": 23, "mem_mb": 50000, "fake_res": 200},
+        group_components={0: 5, 1: 5},
+        overwrite_groups={"a": 0, "a_1": 1, "b": 2, "c": 2},
+        default_resources=Resources.parse(
+            ["mem_mb=0"], defaults="full", allow_expressions=True
+        ),
+        shouldfail=True,
+    )
+    with (Path(tmp) / "qsub.log").open("r") as f:
+        lines = [line for line in f.readlines() if line != "\n"]
+    assert len(lines) == 1
+    shutil.rmtree(tmp)
+
+
+@skip_on_windows
+def test_new_resources_can_be_defined_as_local():
+    # Test only works if both mem_mb and global_res are overwritten as local
+    # See above for explanation of how this test works.
+    tmp = run(
+        dpath("test_group_jobs_resources"),
+        cluster="./qsub",
+        cluster_status="./status_failed",
+        cores=6,
+        nodes=5,
+        cleanup=False,
+        resources={"typo": 23, "mem_mb": 50000, "fake_res": 200, "global_res": 1000},
+        overwrite_resource_scopes={"mem_mb": "local", "global_res": "local"},
+        group_components={0: 5, 1: 5},
+        overwrite_groups={"a": 0, "a_1": 1, "b": 2, "c": 2},
+        default_resources=Resources.parse(
+            ["mem_mb=0"], defaults="full", allow_expressions=True
+        ),
+        shouldfail=True,
+    )
+    with (Path(tmp) / "qsub.log").open("r") as f:
+        lines = [line for line in f.readlines() if line != "\n"]
+        print(lines)
+    assert len(lines) == 2
+    shutil.rmtree(tmp)
+
+
+@skip_on_windows
+def test_resource_prefix_does_not_affect_scope_overwrite():
+    # Test only works if both mem_mb and global_res are overwritten as local
+    # See above for explanation of how this test works.
+    tmp = run(
+        dpath("test_group_jobs_resources"),
+        cluster="./qsub",
+        cluster_status="./status_failed",
+        cores=6,
+        nodes=5,
+        cleanup=False,
+        resources={"typo": 23, "mem_mb": 50000, "fake_res": 200, "global_res": 1000},
+        overwrite_resource_scopes={"mem": "local", "global_res": "local"},
+        group_components={0: 5, 1: 5},
+        overwrite_groups={"a": 0, "a_1": 1, "b": 2, "c": 2},
+        default_resources=Resources.parse(
+            ["mem_mb=0"], defaults="full", allow_expressions=True
+        ),
+        shouldfail=True,
+    )
+    with (Path(tmp) / "qsub.log").open("r") as f:
+        lines = [line for line in f.readlines() if not line == "\n"]
+        print(lines)
+    assert len(lines) == 2
+    shutil.rmtree(tmp)
+
+
+@skip_on_windows
+def test_resources_can_be_overwritten_as_global():
+    # Test only works if fake_res overwritten as global
+    tmp = run(
+        dpath("test_group_jobs_resources"),
+        cluster="./qsub",
+        cluster_status="./status_failed",
+        cores=6,
+        nodes=5,
+        cleanup=False,
+        resources={"typo": 23, "fake_res": 200},
+        overwrite_resource_scopes={"fake_res": "global"},
+        group_components={0: 5, 1: 5},
+        overwrite_groups={"a": 0, "a_1": 1, "b": 2, "c": 2},
+        default_resources=Resources.parse(
+            ["mem_mb=0"], defaults="full", allow_expressions=True
+        ),
+        shouldfail=True,
+    )
+    with (Path(tmp) / "qsub.log").open("r") as f:
+        lines = [line for line in f.readlines() if line != "\n"]
+    assert len(lines) == 1
+    shutil.rmtree(tmp)
+
+
+@skip_on_windows
+def test_scopes_submitted_to_cluster(mocker):
+    from snakemake.spawn_jobs import SpawnedJobArgsFactory
+
+    spy = mocker.spy(SpawnedJobArgsFactory, "get_resource_scopes_arg")
+    run(
+        dpath("test_group_jobs_resources"),
+        cluster="./qsub",
+        overwrite_resource_scopes={"fake_res": "local"},
+        max_threads=1,
+        default_resources=Resources.parse(
+            ["mem_mb=0"], defaults="full", allow_expressions=True
+        ),
+    )
+
+    assert spy.spy_return == "--set-resource-scopes 'fake_res=local'"
+
+
+# @skip_on_windows
+# def test_resources_submitted_to_cluster(mocker):
+#     # In addition, implicitly tests the normalization of mem_mb and disk_mb to mem and
+#     # disk
+#     from snakemake_interface_executor_plugins.executors.base import AbstractExecutor
+
+#     spy = mocker.spy(AbstractExecutor, "get_resource_declarations_dict")
+#     run(
+#         dpath("test_group_jobs_resources"),
+#         cluster="./qsub",
+#         cores=6,
+#         resources={"mem_mb": 60000},
+#         max_threads=1,
+#         group_components={0: 5},
+#         default_resources=Resources.parse(
+#             ["mem_mb=0"], defaults="full", allow_expressions=True
+#         ),
+#     )
+
+#     assert_resources(
+#         spy.spy_return, mem=60000, fake_res=1200, global_res=3000, disk=150000
+#     )
+
+
+# @skip_on_windows
+# def test_excluded_resources_not_submitted_to_cluster(mocker):
+#     from snakemake_interface_executor_plugins.executors.base import AbstractExecutor
+#     from snakemake_interface_executor_plugins.executors.real import RealExecutor
+#     from snakemake_interface_executor_plugins.executors.remote import RemoteExecutor
+
+#     spy = mocker.spy(AbstractExecutor, "get_resource_declarations_dict")
+#     spy2 = mocker.spy(AbstractExecutor, "get_resource_declarations")
+#     spy3 = mocker.spy(RealExecutor, "get_job_args")
+#     spy4 = mocker.spy(RemoteExecutor, "get_job_args")
+#     run(
+#         dpath("test_group_jobs_resources"),
+#         cluster="./qsub",
+#         cores=6,
+#         resources={"mem_mb": 60000},
+#         max_threads=1,
+#         overwrite_resource_scopes={"fake_res": "excluded"},
+#         group_components={0: 5},
+#         default_resources=Resources.parse(
+#             ["mem_mb=0"], defaults="full", allow_expressions=True
+#         ),
+#     )
+#     print(
+#         f"spy == {spy.call_count}",
+#         f"spy2 == {spy2.call_count}",
+#         f"spy3 == {spy3.call_count}",
+#         f"spy4 == {spy4.call_count}",
+#     )
+#     # assert False
+#     assert_resources(spy.spy_return, mem=60000, global_res=3000, disk=150000)
+
+
+@skip_on_windows
+def test_group_job_resources_with_pipe(mocker):
+    import copy
+    from snakemake_interface_executor_plugins.executors.real import RealExecutor
+
+    spy = mocker.spy(GroupResources, "basic_layered")
+
+    # Cluster jobs normally get submitted with cores=all, but for testing purposes,
+    # the system may not actually have enough cores to run the snakemake subprocess
+    # (e.g. gh actions has only 2 cores). So cheat by patching over get_job_args
+    get_job_args = copy.copy(RealExecutor.get_job_args)
+    RealExecutor.get_job_args = lambda *args, **kwargs: get_job_args(
+        *args, **{**kwargs, "cores": 6}
+    )
+    run(
+        dpath("test_group_with_pipe"),
+        cluster="./qsub",
+        cores=6,
+        resources={"mem_mb": 60000},
+        group_components={0: 5},
+        default_resources=Resources.parse(
+            ["mem_mb=0"], defaults="full", allow_expressions=True
+        ),
+    )
+
+    # revert to original version
+    RealExecutor.get_job_args = get_job_args
+
+    assert_resources(
+        dict(spy.spy_return),
+        _nodes=1,
+        _cores=6,
+        runtime=240,
+        mem="50 GB",
+        mem_mb=50000,
+        mem_mib=47684,
+        disk="50 GB",
+        disk_mb=50000,
+        disk_mib=47684,
+    )
+
+
+@skip_on_windows
+def test_group_job_resources_with_pipe_with_too_much_constraint():
+    run(
+        dpath("test_group_with_pipe"),
+        cluster="./qsub",
+        cores=6,
+        resources={"mem_mb": 20000},
+        group_components={0: 5},
+        shouldfail=True,
+        default_resources=Resources.parse(
+            ["mem_mb=0"], defaults="full", allow_expressions=True
+        ),
+    )
+
+
+@skip_on_windows
+def test_group_job_resources_with_pipe_with_too_few_cores():
+    run(
+        dpath("test_group_with_pipe"),
+        cluster="./qsub",
+        cores=2,
+        group_components={0: 5},
+        shouldfail=True,
+        default_resources=Resources.parse(
+            ["mem_mb=0"], defaults="full", allow_expressions=True
+        ),
+    )
+
+
+@skip_on_windows
+def test_multicomp_group_jobs():
+    run(
+        dpath("test_multicomp_group_jobs"),
+        cluster="./qsub",
+        overwrite_groups={"a": "group0", "b": "group0"},
+        group_components={"group0": 2},
+    )
+
+
+@skip_on_windows
+def test_group_job_fail():
+    run(dpath("test_group_job_fail"), cluster="./qsub", shouldfail=True)
+
+
+@skip_on_windows  # Not supported, but could maybe be implemented. https://stackoverflow.com/questions/48542644/python-and-windows-named-pipes
+def test_pipes_simple():
+    run(dpath("test_pipes"), printshellcmds=True)
+
+
+@skip_on_windows
+def test_pipes_multiple():
+    # see github issue #975
+    run(dpath("test_pipes_multiple"), cores=5)
+
+
+def test_pipes_fail():
+    run(dpath("test_pipes_fail"), shouldfail=True)
+
+
+def test_validate():
+    run(dpath("test_validate"))
+
+
+def test_validate_fail():
+    run(
+        dpath("test_validate"),
+        configfiles=[dpath("test_validate/config.fail.yaml")],
+        shouldfail=True,
+    )
+
+
+def test_issue854():
+    # output and benchmark have inconsistent wildcards
+    # this should fail when parsing
+    run(dpath("test_issue854"), shouldfail=True)
+
+
+@skip_on_windows
+def test_issue850():
+    run(dpath("test_issue850"), cluster="./qsub")
+
+
+@skip_on_windows
+def test_issue860():
+    run(dpath("test_issue860"), cluster="./qsub", targets=["done"])
+
+
+def test_issue894():
+    run(dpath("test_issue894"))
+
+
+def test_issue584():
+    run(dpath("test_issue584"))
+
+
+def test_issue912():
+    run(dpath("test_issue912"))
+
+
+@skip_on_windows
+def test_job_properties():
+    run(dpath("test_job_properties"), cluster="./qsub.py")
+
+
+def test_issue916():
+    run(dpath("test_issue916"))
+
+
+@skip_on_windows
+def test_issue930():
+    run(dpath("test_issue930"), cluster="./qsub")
+
+
+# TODO remove skip
+@pytest.mark.skip(
+    reason="Temporarily disable until the stable container image becomes available again."
+)
+@skip_on_windows
+def test_convert_to_cwl():
+    workdir = dpath("test_convert_to_cwl")
+    # run(workdir, export_cwl=os.path.join(workdir, "workflow.cwl"))
+    shell(
+        "cd {workdir}; PYTHONPATH={src} python -m snakemake --export-cwl workflow.cwl",
+        src=Path.cwd(),
+    )
+    shell("cd {workdir}; cwltool --singularity workflow.cwl")
+    assert os.path.exists(os.path.join(workdir, "test.out"))
+
+
+def test_issue1037():
+    run(
+        dpath("test_issue1037"),
+        executor="dryrun",
+        targets=["Foo_A.done"],
+    )
+
+
+def test_checkpoints():
+    run(dpath("test_checkpoints"))
+
+
+def test_checkpoints_dir():
+    run(dpath("test_checkpoints_dir"))
+
+
+def test_checkpoints_many():
+    run(dpath("test_checkpoints_many"))
+
+
+def test_module_checkpoint():
+    run(dpath("test_module_checkpoint"))
+
+
+def test_uncreatable_checkpoint_input():
+    run(dpath("test_uncreatable_checkpoint_input"))
+
+
+@skip_on_windows  # OS agnostic
+@pytest.mark.skipif(ON_MACOS, reason="do not support `ln -s`")
+def test_checkpoint_rerun():
+    d = dpath("test_checkpoint_rerun")
+    run(d, no_tmpdir=True, cleanup=False, check_results=False)
+    shell("echo '1' > {d}/inputs/a/0.out")
+    shell("sleep 2")
+    shell("touch {d}/checkpoint/a1.ls")
+    run(d, no_tmpdir=True, cleanup=False, check_results=False)
+    with open(f"{d}/inputs/a/0.out", "r") as f:
+        assert f.read().strip() == "1"
+
+
+def test_checkpoint_missing_output():
+    """test for issue 3879, also covers 3009"""
+    # normal run to create the checkpoint output and final output
+    tmpdir = run(dpath("test_checkpoint_missing_output"), cleanup=False)
+    assert tmpdir
+    # should not fail (target file exists so nothing to do)
+    (tmpdir / "output" / "test_1.txt").unlink()
+    run(dpath("test_checkpoint_missing_output"), cleanup=False, tmpdir=tmpdir)
+    # should not fail (target file exists so nothing to do)
+    (tmpdir / "output" / "test_0.txt").unlink()
+    run(dpath("test_checkpoint_missing_output"), cleanup=False, tmpdir=tmpdir)
+
+
+def test_issue1092():
+    run(dpath("test_issue1092"))
+
+
+def test_issue958():
+    run(dpath("test_issue958"), executor="dryrun")
+
+
+def test_issue471():
+    run(dpath("test_issue471"))
+
+
+def test_issue1085():
+    run(dpath("test_issue1085"), shouldfail=True)
+
+
+@skip_on_windows
+@skip_on_macos
+def test_issue1083():
+    run(dpath("test_issue1083"), deployment_method={"container"})
+
+
+@skip_on_windows  # Fails with "The flag 'pipe' used in rule two is only valid for outputs
+def test_pipes2():
+    run(dpath("test_pipes2"))
+
+
+def test_expand_flag():
+    run(dpath("test_expand_flag"), shouldfail=True)
+
+
+@skip_on_windows
+def test_default_resources():
+    run(
+        dpath("test_default_resources"),
+        # use fractional defaults here to test whether they are correctly rounded
+        default_resources=(
+            ["mem_mb=max(2*input.size, 1000.1)", "disk_mb=max(2*input.size, 1000.2)"]
+        ),
+    )
+
+
+@skip_on_windows
+def test_default_resources_humanreadable():
+    run(
+        dpath("test_default_resources"),
+        # use fractional defaults here to test whether they are correctly rounded
+        default_resources=(["mem='1 Gb'", "disk='0.001 TB'"]),
+    )
+
+
+@skip_on_windows
+def test_default_resources_humanreadable_disallowed_for_suffixed():
+    run(
+        dpath("test_default_resources"),
+        # use fractional defaults here to test whether they are correctly rounded
+        default_resources=(["mem_mb='1 Gb'", "disk_mib='0.001 TB'"]),
+        shouldfail=True,
+    )
+
+
+@skip_on_windows
+def test_default_resources_mebibytes():
+    run(
+        dpath("test_default_resources"),
+        # use fractional defaults here to test whether they are correctly rounded
+        default_resources=(["mem_mib=953.67", "disk_mib=953.6743"]),
+    )
+
+
+@skip_on_windows  # TODO fix the windows case: it somehow does not consistently modify all temp env vars as desired
+def test_tmpdir():
+    test_path = dpath("test_tmpdir")
+    general_profile = os.path.join(test_path, "profile")
+    # workflow profile is loaded by default
+    run(
+        test_path,
+        shellcmd=f"snakemake -c1 --profile {general_profile} --set-resources 'a:tmpdir=/tmp'",
+    )
+
+
+def test_issue1284():
+    run(dpath("test_issue1284"))
+
+
+def test_issue1281():
+    run(dpath("test_issue1281"))
+
+
+@skip_on_windows  # TODO on windows, dot command is suddenly not found anymore although it is installed
+@pytest.mark.skipif(
+    ON_MACOS, reason="graphviz dot needs to be configured"
+)  # Error msg: Perhaps "dot -c" needs to be run (with installer's privileges) to register the plugins?
+def test_filegraph():
+    workdir = dpath("test_filegraph")
+    dot_path = os.path.join(workdir, "fg.dot")
+    pdf_path = os.path.join(workdir, "fg.pdf")
+
+    if ON_WINDOWS:
+        shell.executable("bash")
+        workdir = workdir.replace("\\", "/")
+        dot_path = dot_path.replace("\\", "/")
+
+    # make sure the calls work
+    shell("cd {workdir}; python -m snakemake --filegraph > {dot_path}")
+
+    # make sure the output can be interpreted by dot
+    shell("cd {workdir}; dot -Tpdf > {pdf_path} < {dot_path}")
+
+    # make sure the generated pdf file is not empty
+    assert os.stat(pdf_path).st_size > 0
+
+
+def test_batch():
+    run(dpath("test_batch"), batch=Batch("aggregate", 1, 2))
+
+
+def test_batch_final():
+    run(dpath("test_batch_final"), batch=Batch("aggregate", 1, 1))
+
+
+def test_batch_fail():
+    run(dpath("test_batch"), batch=Batch("aggregate", 2, 2), shouldfail=True)
+
+
+def test_github_issue52():
+    run(dpath("test_github_issue52"))
+    run(dpath("test_github_issue52"), snakefile="other.smk")
+
+
+@skip_on_windows
+@skip_on_macos
+def test_github_issue78():
+    run(dpath("test_github_issue78"), deployment_method={"container"})
+
+
+def test_envvars():
+    for var in ["TEST_ENV_VAR", "TEST_ENV_VAR2"]:
+        try:
+            del os.environ[var]
+        except KeyError:
+            pass
+    run(dpath("test_envvars"), shouldfail=True)
+    os.environ["TEST_ENV_VAR"] = "test"
+    os.environ["TEST_ENV_VAR2"] = "test"
+    run(dpath("test_envvars"), envvars=["TEST_ENV_VAR2"])
+
+
+def test_github_issue105():
+    run(dpath("test_github_issue105"))
+
+
+def test_github_issue413():
+    run(dpath("test_github_issue413"))
+
+
+@skip_on_windows
+def test_github_issue627():
+    run(dpath("test_github_issue627"))
+
+
+def test_github_issue727():
+    run(dpath("test_github_issue727"))
+
+
+@skip_on_windows
+@pytest.mark.skipif(
+    ON_MACOS,
+    reason="`wc` command spacing differs between macOS and Linux, expected output is from linux",
+)
+def test_github_issue988():
+    run(dpath("test_github_issue988"))
+
+
+@pytest.mark.skip(
+    reason="ftp connections currently fail in github actions (TODO try again in the future)"
+)
+def test_github_issue1062():
+    # old code failed in dry run
+    run(dpath("test_github_issue1062"), executor="dryrun")
+
+
+def test_output_file_cache():
+    test_path = dpath("test_output_file_cache")
+    os.environ["SNAKEMAKE_OUTPUT_CACHE"] = "cache"
+    run(test_path, cache=["a", "b"])
+    run(test_path, cache=["invalid_multi"], targets="invalid1.txt", shouldfail=True)
+
+
+@skip_on_windows
+@pytest.mark.needs_s3
+def test_output_file_cache_storage(s3_storage):
+    prefix, settings = s3_storage
+    test_path = dpath("test_output_file_cache_storage")
+    os.environ["SNAKEMAKE_OUTPUT_CACHE"] = f"{prefix}-cache"
+    run(
+        test_path,
+        cache=["a", "b", "c"],
+        default_storage_provider="s3",
+        default_storage_prefix=prefix,
+        storage_provider_settings=settings,
+    )
+
+
+@pytest.mark.parametrize("executor", ["dryrun", "touch"])
+@patch("snakemake.dag.DAG.retrieve_storage_inputs", new_callable=AsyncMock)
+def test_storage_noretrieve_dryrun_or_touch(mock_retrieve_storage_inputs, executor):
+    run(dpath("test_storage_noretrieve_dryrun"), executor=executor)
+    mock_retrieve_storage_inputs.assert_not_called()
+
+
+def test_multiext():
+    run(dpath("test_multiext"))
+
+
+def test_core_dependent_threads():
+    run(dpath("test_core_dependent_threads"))
+
+
+@pytest.mark.needs_envmodules
+@skip_on_windows
+def test_env_modules():
+    run(dpath("test_env_modules"), deployment_method={"envmodules"})
+
+
+@skip_on_windows
+@connected
+@apptainer
+def test_container_b():
+    run(
+        dpath("test_container"),
+        deployment_method={"container"},
+        container_runtime="apptainer",
+    )
+
+
+@skip_on_windows
+@skip_on_macos
+def test_dynamic_container():
+    run(dpath("test_dynamic_container"), deployment_method={"container"})
+
+
+@skip_on_windows
+def test_string_resources():
+    run(
+        dpath("test_string_resources"),
+        default_resources=["gpu_model='nvidia-tesla-1000'"],
+        cluster="./qsub.py",
+    )
+
+
+def test_jupyter_notebook():
+    run(dpath("test_jupyter_notebook"), deployment_method={"conda"})
+
+
+# TODO re-enable as soon as possible. The test currently fails because nbconvert
+# changes the working directory to the notebook directory but before resolves the
+# python path to a local path. It then cannot find the python executable later
+# when it has changed the workdir.
+# def test_jupyter_notebook_nbconvert():
+#     run(
+#         dpath("test_jupyter_notebook_nbconvert"),
+#         deployment_method={"conda"},
+#     )
+
+
+def test_jupyter_notebook_draft():
+    from snakemake.settings.types import NotebookEditMode
+
+    run(
+        dpath("test_jupyter_notebook_draft"),
+        deployment_method={"conda"},
+        edit_notebook=NotebookEditMode(draft_only=True),
+        targets=["results/result_intermediate.txt"],
+        check_md5=False,
+    )
+
+
+def test_github_issue456():
+    run(dpath("test_github_issue456"))
+
+
+def test_scatter_gather():
+    run(dpath("test_scatter_gather"), overwrite_scatter={"split": 2})
+
+
+# SLURM tests go here, after successful tests
+
+
+def test_parsing_terminal_comment_following_statement():
+    run(dpath("test_parsing_terminal_comment_following_statement"))
+
+
+@skip_on_windows
+def test_github_issue640():
+    tmpdir = run(
+        dpath("test_github_issue640"),
+        targets=["Output/FileWithRights"],
+        executor="dryrun",
+        cleanup=False,
+    )
+    shell(f"chmod -R u+rwX {tmpdir}")
+    shutil.rmtree(tmpdir)
+
+
+def test_generate_unit_tests():
+    run(
+        dpath("test_generate_unit_tests"),
+        shellcmd="snakemake --generate-unit-tests ../../.tests/unit --directory .tests/integration",
+        no_tmpdir=True,
+        cleanup=False,
+    )
+    sp.check_call(
+        ["pytest", ".tests/unit", "-vs"], cwd=dpath("test_generate_unit_tests")
+    )
+
+
+def test_paramspace():
+    run(dpath("test_paramspace"))
+
+
+def test_paramspace_single_wildcard():
+    run(dpath("test_paramspace_single_wildcard"))
+
+
+def test_github_issue806():
+    run(dpath("test_github_issue806"), config=dict(src_lang="es", trg_lang="en"))
+
+
+def test_long_shell():
+    run(dpath("test_long_shell"))
+
+
+def test_modules_all():
+    run(dpath("test_modules_all"), targets=["all"])
+
+
+def test_modules_name():
+    run(
+        dpath("test_modules_name"),
+        targets=["all"],
+    )
+
+
+def test_modules_no_name():
+    run(
+        dpath("test_modules_no_name"),
+        targets=["all"],
+        shouldfail=True,
+    )
+
+
+def test_modules_two_names():
+    run(
+        dpath("test_modules_two_names"),
+        targets=["all"],
+        shouldfail=True,
+    )
+
+
+def test_modules_dynamic():
+    run(dpath("test_modules_dynamic"), targets=["all"])
+
+
+def test_modules_dynamic_module_as_alias():
+    run(dpath("test_modules_dynamic_module_as_alias"), targets=["all"])
+
+
+def test_modules_semi_dynamic():
+    run(dpath("test_modules_semi_dynamic"), targets=["all"])
+
+
+def test_modules_dynamic_import_rules():
+    run(dpath("test_modules_dynamic_import_rules"), targets=["all"])
+
+
+def test_modules_dynamic_no_as():
+    run(dpath("test_modules_dynamic_no_as"), targets=["all"])
+
+
+def test_module_nested():
+    run(dpath("test_module_nested"))
+    run(
+        dpath("test_module_nested"),
+        snakefile="module_shallow.smk",
+        executor="dryrun",
+        shouldfail=True,
+    )
+    run(
+        dpath("test_module_nested"),
+        snakefile="module_shallow.smk",
+        targets=["aaalog"],
+        config={"bb": "Snakefile"},
+        executor="dryrun",
+        check_results=False,
+    )
+
+
+def test_modules_all_exclude_1():
+    # Fail due to conflicting rules
+    run(dpath("test_modules_all_exclude"), shouldfail=True)
+
+
+def test_modules_all_exclude_2():
+    # Succeeded since the conflicting rules have been excluded
+    run(
+        dpath("test_modules_all_exclude"),
+        snakefile="Snakefile_exclude",
+        shouldfail=False,
+    )
+
+
+@skip_on_windows
+def test_modules_prefix():
+    run(dpath("test_modules_prefix"), targets=["a"])
+
+
+@skip_on_windows
+def test_modules_peppy():
+    run(dpath("test_modules_peppy"), targets=["a"])
+
+
+def test_modules_specific():
+    run(dpath("test_modules_specific"), targets=["test_a"])
+
+
+@skip_on_windows  # works in principle but the test framework modifies the target path separator
+@connected
+def test_modules_meta_wrapper():
+    run(
+        dpath("test_modules_meta_wrapper"),
+        targets=["mapped/a.bam.bai"],
+        executor="dryrun",
+    )
+
+
+def test_use_rule_same_module():
+    run(dpath("test_use_rule_same_module"), targets=["test.out", "test2.out"])
+
+
+@connected
+def test_module_complex():
+    # min_version() checks can fail in a test sandbox, so patch them out
+    with patch("snakemake.utils.min_version", return_value=True):
+        run(dpath("test_module_complex"), executor="dryrun")
+
+
+@connected
+def test_module_complex2():
+    # min_version() checks can fail in a test sandbox, so patch them out
+    with patch("snakemake.utils.min_version", return_value=True):
+        run(dpath("test_module_complex2"), executor="dryrun")
+
+
+@skip_on_windows
+def test_module_no_prefixing_modified_paths():
+    run(
+        dpath("test_module_no_prefixing_modified_paths"),
+        targets=["module2/test_final.txt"],
+    )
+
+
+@skip_on_windows
+def test_modules_prefix_local():
+    run(
+        dpath("test_modules_prefix_local"),
+        targets=["out_1/test_final.txt"],
+    )
+
+
+@connected
+@skip_on_windows  # filenames too long on windows
+def test_module_with_script():
+    # min_version() checks can fail in a test sandbox, so patch them out
+    with patch("snakemake.utils.min_version", return_value=True):
+        run(dpath("test_module_with_script"))
+
+
+def test_module_worfklow_namespacing():
+    run(dpath("test_module_workflow_snakefile_usage"))
+
+
+@skip_on_windows  # No conda-forge version of pygraphviz for windows
+@connected
+def test_module_report():
+    run(
+        dpath("test_module_report"),
+        report="report.html",
+        report_stylesheet="custom-stylesheet.css",
+        check_md5=False,
+    )
+
+
+def test_handover():
+    run(dpath("test_handover"), resources={"mem_mb": 20})
+
+
+@skip_on_windows  # test shell command not properly working
+def test_source_path():
+    run(dpath("test_source_path"), snakefile="workflow/Snakefile")
+
+
+@skip_on_windows  # test shell command not properly working
+def test_source_path_parent():
+    run(dpath("test_source_path_parent"), snakefile="nest/subdir/Snakefile")
+
+
+@skip_on_windows  # test shell command not properly working
+def test_source_path_rerun():
+    import time
+
+    path1 = run(dpath("test_source_path_rerun"), cleanup=False)
+
+    param_out = os.path.join(path1, "test.out")
+    input_out = os.path.join(path1, "test2.out")
+
+    mtime_param_1 = os.stat(param_out).st_mtime_ns
+    mtime_input_1 = os.stat(input_out).st_mtime_ns
+
+    time.sleep(1.1)
+    run(dpath("test_source_path_rerun"), tmpdir=path1, cleanup=False)
+
+    mtime_param_2 = os.stat(param_out).st_mtime_ns
+    mtime_input_2 = os.stat(input_out).st_mtime_ns
+
+    # rerun of the same workflow with source_path as param results in a rerun
+    assert mtime_param_1 != mtime_param_2
+    # rerun of the same workflow with source_path as input results in no rerun
+    assert mtime_input_1 == mtime_input_2
+
+
+@only_on_windows
+def test_filesep_windows_targets():
+    run(
+        dpath("test_filesep_windows"),
+        targets=["subfolder/test2.out2", "subfolder/test1.out2"],
+    )
+
+
+@only_on_windows
+def test_filesep_on_windows():
+    run(dpath("test_filesep_windows"))
+
+
+def test_set_resources():
+    run(dpath("test_set_resources"), overwrite_resources={"a": {"a": 1, "b": "foo"}})
+
+
+def test_github_issue1069():
+    run(
+        dpath("test_github_issue1069"),
+        shellcmd="snakemake -c1 --resources mem_mb=16423",
+    )
+
+
+# os independent
+@skip_on_windows
+def test_max_jobs_per_timespan():
+    run(dpath("test01"), shellcmd="snakemake --max-jobs-per-timespan 2/1s --cores 3")
+
+
+@skip_on_windows
+def test_max_jobs_per_timespan_single_timer(monkeypatch):
+    # each scheduling round used to start its own chain of reevaluation timers
+    from snakemake.scheduling import job_scheduler
+
+    lock = threading.Lock()
+    pending = max_pending = 0
+
+    class Timer(threading.Timer):
+        def __init__(self, interval, function, args=None, kwargs=None):
+            def fire(*args, **kwargs):
+                nonlocal pending
+                with lock:
+                    pending -= 1
+                function(*args, **kwargs)
+
+            super().__init__(interval, fire, args, kwargs)
+
+        def start(self):
+            nonlocal pending, max_pending
+            with lock:
+                pending += 1
+                max_pending = max(max_pending, pending)
+            super().start()
+
+    monkeypatch.setattr(job_scheduler.threading, "Timer", Timer)
+    run(
+        dpath("test_max_jobs_per_timespan_single_timer"),
+        cores=2,
+        max_jobs_per_timespan=MaxJobsPerTimespan(3, "1s"),
+    )
+    # the limit was reached, and a single wake-up was pending at a time
+    assert max_pending == 1
+
+
+@skip_on_windows
+def test_max_jobs_per_timespan_sliding_window(monkeypatch):
+    """No more than max_jobs jobs are registered within any timespan."""
+    # use the limiter's recorded times, as job starts are slightly later
+    from snakemake.scheduling.job_scheduler import JobRateLimiter
+
+    registered = []
+    limit = MaxJobsPerTimespan(3, "1s")
+    register_jobs = JobRateLimiter.register_jobs
+
+    def record_register_jobs(self, n_jobs):
+        """Register the jobs, then record the times the limiter stored for them."""
+        register_jobs(self, n_jobs)
+        if n_jobs:
+            registered.extend(list(self._jobs)[-n_jobs:])
+
+    monkeypatch.setattr(JobRateLimiter, "register_jobs", record_register_jobs)
+    run(
+        dpath("test_max_jobs_per_timespan_single_timer"),
+        cores=2,
+        max_jobs_per_timespan=limit,
+    )
+    # all twelve work jobs and the final rule are counted by the limiter
+    assert len(registered) == 13
+    # the limiter expires timestamps at the left boundary of (t - timespan, t]
+    for first, last in zip(registered, registered[limit.max_jobs :]):
+        assert first <= last - limit.timespan, (
+            f"More than {limit.max_jobs} jobs registered within {limit.timespan}s: "
+            f"{registered}"
+        )
+
+
+@skip_on_windows
+def test_max_jobs_per_timespan_wakeup(monkeypatch):
+    """Jobs held back by the limit start once the timespan is over.
+
+    They do not wait for a running job to finish (#3019).
+    """
+    from snakemake.scheduling.job_scheduler import JobScheduler
+
+    submitted, finished = [], []
+    orig_run, orig_proceed = JobScheduler.run, JobScheduler._proceed
+
+    def record_run(self, jobs, executor=None):
+        """Submit the jobs, record when, and release them after the fourth."""
+        result = orig_run(self, jobs, executor=executor)
+        submitted.extend(time.time() for job in jobs if job.rule.name == "work")
+        if len(submitted) == 4:
+            # let the jobs finish (they wait for this file in the workdir)
+            Path("released").touch()
+        return result
+
+    def record_proceed(self, job):
+        """Record when a work job finished, then proceed."""
+        if job.rule.name == "work":
+            finished.append(time.time())
+        return orig_proceed(self, job)
+
+    monkeypatch.setattr(JobScheduler, "run", record_run)
+    monkeypatch.setattr(JobScheduler, "_proceed", record_proceed)
+    run(
+        dpath("test_max_jobs_per_timespan_wakeup"),
+        cores=8,
+        # the fourth job is held back, and the final rule gets a slot even
+        # when jobs are only submitted once a running one finished
+        max_jobs_per_timespan=MaxJobsPerTimespan(3, "1s"),
+    )
+    assert len(submitted) == 4
+    assert max(submitted) < min(finished)
+
+
+@skip_on_windows
+def test_max_jobs_per_timespan_exit():
+    # a pending reevaluation timer does not keep the process alive
+    start = time.time()
+    run(
+        dpath("test_max_jobs_per_timespan_exit"),
+        shellcmd="snakemake --max-jobs-per-timespan 2/1m --cores 1",
+    )
+    assert time.time() - start < 30
+
+
+def test_touch_pipeline_with_temp_dir():
+    # Issue #1028
+    run(dpath("test_touch_pipeline_with_temp_dir"), forceall=True, executor="touch")
+
+
+def test_all_temp():
+    run(dpath("test_all_temp"), all_temp=True)
+
+
+def test_strict_mode():
+    run(dpath("test_strict_mode"), shouldfail=True)
+
+
+@needs_strace
+def test_github_issue1158():
+    path = dpath("test_github_issue1158")
+    with prepare_tmpdir(path) as tmpdir:
+        run(path, cluster="./qsub.py", tmpdir=tmpdir, cleanup=False)
+
+
+def test_ancient_dag():
+    run(dpath("test_ancient_dag"))
+
+
+@skip_on_windows
+def test_checkpoint_allowed_rules():
+    run(dpath("test_checkpoint_allowed_rules"), targets=["c"], cluster="./qsub")
+
+
+@skip_on_windows
+def test_checkpoint_allowed_rules_target_jobs():
+    # Emulates the job step of rule c, as executor plugins run it.
+    # Rule b would produce the missing input of c, but it is not allowed to run.
+    path = dpath("test_checkpoint_allowed_rules_target_jobs")
+    with prepare_tmpdir(path) as tmpdir:
+        run(
+            path,
+            shellcmd="snakemake --target-jobs c: --allowed-rules c --force "
+            "--cores 1 --latency-wait 0 --mode remote",
+            shouldfail=True,
+            tmpdir=tmpdir,
+            cleanup=False,
+        )
+        assert not (Path(tmpdir) / "b.txt").exists()
+
+
+@skip_on_windows
+def test_modules_ruledeps_inheritance():
+    run(dpath("test_modules_ruledeps_inheritance"))
+
+
+@skip_on_windows
+def test_issue1331():
+    # not guaranteed to fail, so let's try multiple times
+    for _ in range(10):
+        run(dpath("test_issue1331"), cores=4)
+
+
+@skip_on_windows
+def test_default_target():
+    run(dpath("test_default_target"))
+
+
+def test_cache_multioutput():
+    os.environ["SNAKEMAKE_OUTPUT_CACHE"] = "cache"
+    run(dpath("test_cache_multioutput"), cache=["a"])
+
+
+@skip_on_windows
+def test_github_issue1384():
+    try:
+        tmpdir = run(dpath("test_github_issue1384"), cleanup=False)
+        shell("""
+            cd {tmpdir}
+            python -m snakemake --generate-unit-tests
+            pytest -v .tests/unit
+            """)
+    finally:
+        shutil.rmtree(tmpdir)
+
+
+@skip_on_windows
+def test_peppy():
+    run(dpath("test_peppy"))
+
+
+@skip_on_windows
+def test_pep_pathlib():
+    run(dpath("test_pep_pathlib"))
+
+
+def test_template_engine():
+    run(dpath("test_template_engine"))
+
+
+def test_groupid_expand_local():
+    run(dpath("test_groupid_expand"))
+
+
+def test_script_import_snakemake_obj():
+    run(dpath("test_script_import_snakemake_obj"))
+
+
+@skip_on_windows
+def test_groupid_expand_cluster():
+    run(dpath("test_groupid_expand_cluster"), cluster="./qsub", nodes=3)
+
+
+@skip_on_windows
+def test_service_jobs():
+    run(dpath("test_service_jobs"), check_md5=False)
+
+
+def test_incomplete_params():
+    run(
+        dpath("test_incomplete_params"),
+        executor="dryrun",
+        printshellcmds=True,
+    )
+
+
+@skip_on_windows
+def test_github_issue261():
+    run(dpath("test_github_issue261"), targets=["test1/target1/config1.done"])
+
+
+@skip_on_windows  # no pipe support on windows
+def test_pipe_depend():
+    run(dpath("test_pipe_depend"), shouldfail=True)
+
+
+@skip_on_windows  # no pipe support on windows
+def test_pipe_depend_target_file():
+    run(dpath("test_pipe_depend"), targets=["test.txt"], shouldfail=True)
+
+
+@skip_on_windows  # platform independent issue
+def test_github_issue1500():
+    run(dpath("test_github_issue1500"), executor="dryrun")
+
+
+def test_github_issue1542():
+    run(dpath("test_github_issue1542"), executor="dryrun")
+
+
+def test_github_issue1550():
+    run(
+        dpath("test_github_issue1550"),
+        resources={"mem_mb": 4000},
+        default_resources=(
+            ["mem_mb=max(2*input.size, 1000)", "disk_mb=max(2*input.size, 1000)"]
+        ),
+    )
+
+
+def test_github_issue1498():
+    run(dpath("test_github_issue1498"))
+
+
+def test_lazy_resources():
+    run(dpath("test_lazy_resources"))
+
+
+def test_cleanup_metadata_fail():
+    run(dpath("test09"), cleanup_metadata=["xyz"], shouldfail=True)
+
+
+@skip_on_windows  # same on win, no need to test
+def test_github_issue1389():
+    run(dpath("test_github_issue1389"), resources={"foo": 4}, shouldfail=True)
+
+
+def test_github_issue2142():
+    run(dpath("test_github_issue2142"))
+
+
+def test_ensure_nonempty_fail():
+    run(dpath("test_ensure"), targets=["a"], shouldfail=True)
+
+
+def test_ensure_success():
+    run(dpath("test_ensure"), targets=["b", "c"])
+
+
+def test_ensure_checksum_fail():
+    run(dpath("test_ensure"), targets=["d"], shouldfail=True)
+
+
+def test_fstring():
+    run(dpath("test_fstring"), targets=["SID23454678.txt"])
+
+
+@skip_on_windows  # OS independent
+def test_priority():
+    run(dpath("test_priority"), cores=1)
+
+
+@skip_on_windows  # OS independent
+def test_priority_invalid():
+    run(dpath("test_priority_invalid"), shouldfail=True)
+
+
+@skip_on_windows
+def test_github_issue1261():
+    run(dpath("test_github_issue1261"), shouldfail=True, check_results=True)
+
+
+def test_rule_inheritance_globals():
+    run(
+        dpath("test_rule_inheritance_globals"),
+        report="report.html",
+        targets=["foo.txt"],
+        check_md5=False,
+    )
+
+
+def test_retries():
+    run(dpath("test_retries"))
+
+
+def test_retries_not_overriden():
+    run(dpath("test_retries_not_overriden"), retries=3, shouldfail=True)
+
+
+@skip_on_windows  # OS agnostic
+def test_module_input_func():
+    run(dpath("test_module_input_func"))
+
+
+@skip_on_windows  # sufficient to test this on linux
+def test_github_issue1618():
+    run(dpath("test_github_issue1618"), cores=5)
+
+
+@skip_on_windows
+def test_github_issue1818():
+    run(dpath("test_github_issue1818"), rerun_triggers={RerunTrigger.INPUT})
+
+
+@skip_on_windows  # not platform dependent
+def test_match_by_wildcard_names():
+    run(dpath("test_match_by_wildcard_names"))
+
+
+@skip_on_windows  # not platform dependent
+def test_github_issue929():
+    # Huge thanks to Elmar Pruesse for providing this test case
+    # and pointing to the problem in the code!
+    # Huge thanks to Ronald Lehnigk for pointing me to the issue!
+    run(dpath("test_github_issue929"), targets=["childrule_2"])
+
+
+def test_github_issue1882():
+    try:
+        tmpdir = run(dpath("test_github_issue1882"), cleanup=False)
+        run(tmpdir, forceall=True)
+    finally:
+        shutil.rmtree(tmpdir)
+
+
+def test_github_issue3213():
+    tmpdir = None
+    try:
+        import linecache
+
+        output_files = ["file_a.txt", "file_b.txt"]
+
+        tmpdir = run(dpath("test_github_issue3213"), cleanup=False, check_results=False)
+        ts_a1, ts_b1 = [open(os.path.join(tmpdir, f)).read() for f in output_files]
+
+        # Need to clear the cache so that we notice the Snakefile file has changed.
+        # In practice it's not a problem.
+        linecache.clearcache()
+
+        shutil.copy(
+            os.path.join(dpath("test_github_issue3213"), "Snakefile.newver"),
+            os.path.join(tmpdir, "Snakefile"),
+        )
+        run(
+            dpath("test_github_issue3213"),
+            tmpdir=tmpdir,
+            cleanup=False,
+            check_results=False,
+        )
+        ts_a2, ts_b2 = [open(os.path.join(tmpdir, f)).read() for f in output_files]
+
+        run(
+            dpath("test_github_issue3213"),
+            tmpdir=tmpdir,
+            cleanup=False,
+            check_results=False,
+            forceall=True,
+        )
+        ts_a3, ts_b3 = [open(os.path.join(tmpdir, f)).read() for f in output_files]
+
+        assert ts_a1[0] == ts_a2[0] == ts_a3[0] == "A"
+        assert ts_b1[0] == "B"
+        assert ts_b2[0] == ts_b3[0] == "D"
+
+        assert ts_a1 == ts_a2
+        assert ts_b1 != ts_b2
+        assert ts_a2 != ts_a3
+        assert ts_b2 != ts_b3
+    finally:
+        if tmpdir is not None:
+            shutil.rmtree(tmpdir)
+
+
+def test_issue_3970():
+    run(
+        dpath("test_issue3970"),
+        shellcmd="snakemake --cores 1 --default-resources mem_mb=3*1024+input.size_mb",
+        check_results=False,
+    )
+
+
+@skip_on_windows  # not platform dependent
+def test_inferred_resources():
+    run(dpath("test_inferred_resources"))
+
+
+@skip_on_windows  # not platform dependent
+def test_workflow_profile():
+    test_path = dpath("test_workflow_profile")
+    general_profile = os.path.join(test_path, "dummy-general-profile")
+    # workflow profile is loaded by default
+    run(
+        test_path,
+        snakefile="workflow/Snakefile",
+        shellcmd=f"snakemake --profile {general_profile}",
+    )
+
+
+@skip_on_windows  # not platform dependent
+def test_workflow_profile_cli_overwrite():
+    run(
+        dpath("test_workflow_profile_cli_overwrite"),
+        snakefile="workflow/Snakefile",
+        shellcmd=f"snakemake --set-resources a:foo='overwritten' a:mem_mb=8 --cores 2",
+    )
+
+
+@skip_on_windows  # not platform dependent
+def test_workflow_profile_default_path():
+    run(
+        dpath("test_workflow_profile_relative_path"),
+        snakefile="workflow/Snakefile",
+        shellcmd="snakemake --workflow-profile workflow_at_site_x --cores 1",
+    )
+
+
+@skip_on_windows  # not platform dependent
+def test_workflow_profile_relative_path():
+    run(
+        dpath("test_workflow_profile_relative_path"),
+        snakefile="workflow/Snakefile",
+        shellcmd="snakemake --workflow-profile workflow/profiles/workflow_at_site_x --cores 1",
+    )
+
+
+@skip_on_windows  # not platform dependent
+def test_workflow_profile_relative_filename():
+    run(
+        dpath("test_workflow_profile_relative_filename"),
+        snakefile="workflow/Snakefile",
+        shellcmd="snakemake --workflow-profile ./workflow/some_dir/workflow_profile.yaml --cores 1",
+    )
+
+
+@skip_on_windows  # not platform dependent
+def test_no_workflow_profile():
+    test_path = dpath("test_no_workflow_profile")
+    general_profile = os.path.join(test_path, "dummy-general-profile")
+    # workflow profile is loaded by default
+    run(
+        test_path,
+        snakefile="workflow/Snakefile",
+        shellcmd=f"snakemake --profile {general_profile} --workflow-profile none -c1",
+    )
+
+
+@skip_on_windows  # not platform dependent
+def test_runtime_conversion_from_workflow_profile():
+    test_path = dpath("test_runtime_conversion_from_workflow_profile")
+    run(
+        test_path,
+        snakefile="workflow/Snakefile",
+        shellcmd="snakemake -c1",
+    )
+
+
+@skip_on_windows
+def test_localrule():
+    run(dpath("test_localrule"), targets=["1.txt", "2.txt"])
+
+
+@skip_on_windows
+def test_module_wildcard_constraints():
+    run(dpath("test_module_wildcard_constraints"))
+
+
+def test_module_global_container():
+    """Test that a module's top-level container: directive does not overwrite
+    the master workflow's container: directive, and that each scope's rules
+    get the correct container image."""
+    from snakemake import api
+    from snakemake.settings import types as settings
+
+    test_path = dpath("test_module_global_container")
+
+    with api.SnakemakeApi(
+        settings.OutputSettings(verbose=False),
+    ) as snakemake_api:
+        workflow_api = snakemake_api.workflow(
+            resource_settings=settings.ResourceSettings(cores=1),
+            config_settings=settings.ConfigSettings(),
+            storage_settings=settings.StorageSettings(),
+            workflow_settings=settings.WorkflowSettings(),
+            deployment_settings=settings.DeploymentSettings(),
+            snakefile=test_path / "Snakefile",
+            workdir=test_path,
+        )
+        workflow = workflow_api._workflow
+
+        rules_by_name = {rule.name: rule for rule in workflow.rules}
+
+        # The module rule should get the module's container image
+        for rname, dversion in (("a", "module"), ("all", "master")):
+            container_img = rules_by_name[rname].software_env_specs.legacy_container_img
+            expected = f"docker://{dversion}_image"
+            assert container_img == expected, (
+                f"Module rule '{rname}' has {container_img=!r}, "
+                f"expected '{expected}'"
+            )
+
+
+def test_info_header_unknown_user(monkeypatch):
+    """
+    Test that the workflow info header does not fail if getpass.getuser()
+    raises (e.g. when running under a UID with no passwd entry).
+    """
+    import getpass
+    from snakemake import api
+    from snakemake.settings import types as settings
+
+    exc_types = (OSError, KeyError, ImportError)
+
+    try:
+        real_user = getpass.getuser()
+    except exc_types:
+        real_user = None
+
+    def make_fake_getuser(exc_type: type[Exception]):
+        def fake_getuser():
+            raise exc_type("no user")
+
+        return fake_getuser
+
+    # Just need a minimal Snakefile, we're not running it
+    test_path = dpath("test_unlock")
+
+    with api.SnakemakeApi(
+        settings.OutputSettings(verbose=False),
+    ) as snakemake_api:
+
+        workflow_api = snakemake_api.workflow(
+            resource_settings=settings.ResourceSettings(cores=1),
+            snakefile=test_path / "Snakefile",
+            workdir=test_path,
+        )
+        workflow = workflow_api._workflow
+
+        # Without patching - check it matches the real user
+        if real_user is not None:
+            assert workflow.info_header["user"] == real_user
+        else:
+            assert workflow.info_header["user"] == "unavailable"
+
+        # Patch getuser() to raise each expected exception type
+        for exc_type in exc_types:
+            monkeypatch.setattr(getpass, "getuser", make_fake_getuser(exc_type))
+            assert workflow.info_header["user"] == "unavailable"
+
+
+@skip_on_windows
+def test_config_yte():
+    run(dpath("test_config_yte"))
+
+
+@connected
+def test_load_metawrapper():
+    run(dpath("test_load_metawrapper"), executor="dryrun")
+
+
+def test_missing_file_dryrun():
+    run(dpath("test_missing_file_dryrun"), executor="dryrun", shouldfail=True)
+
+
+def test_issue1256():
+    snakefile = os.path.join(dpath("test_issue1256"), "Snakefile")
+    p = sp.Popen(
+        f"snakemake -s {snakefile}",
+        shell=True,
+        stdout=sp.PIPE,
+        stderr=sp.PIPE,
+    )
+    _, stderr = p.communicate()
+    stderr = stderr.decode()
+    assert p.returncode == 1
+    assert "SyntaxError" in stderr
+    assert "line 9" in stderr
+
+
+def test_issue2574():
+    snakefile = os.path.join(dpath("test_issue2574"), "Snakefile")
+    configfile = os.path.join(dpath("test_issue2574"), "config.yaml")
+    p = sp.Popen(
+        f"snakemake -s {snakefile} --configfile {configfile} --lint",
+        shell=True,
+        stdout=sp.PIPE,
+        stderr=sp.PIPE,
+    )
+    stdout, stderr = p.communicate()
+    stderr = stderr.decode()
+    assert p.returncode == 1
+    assert "KeyError" in stderr
+    assert "line 4," in stderr
+
+
+@skip_on_windows  # not platform dependent, only cli
+def test_default_storage_provider_none():
+    run(dpath("test01"), shellcmd="snakemake --default-storage-provider none -c3")
+
+
+def test_resource_tbdstring():
+    test_path = dpath("test_resource_tbdstring")
+    results_dir = Path(test_path) / "expected-results"
+    results_dir.mkdir(exist_ok=True)
+    run(test_path, executor="dryrun", check_results=False)
+
+
+def test_queue_input():
+    run(dpath("test_queue_input"))
+
+
+def test_queue_input_dryrun():
+    run(dpath("test_queue_input"), executor="dryrun", check_results=False)
+
+
+def test_queue_input_forceall():
+    run(dpath("test_queue_input"), forceall=True)
+
+
+@skip_on_windows  # OS independent
+def test_issue2685():
+    run(dpath("test_issue2685"))
+
+
+@skip_on_windows  # OS agnostic
+def test_set_resources_complex():
+    run(
+        dpath("test05"),
+        shellcmd="snakemake --verbose -c1 --set-resources \"compute1:slurm_extra='--nice=10'\"",
+    )
+
+
+@skip_on_windows  # OS agnostic
+def test_set_resources_human_readable():
+    run(
+        dpath("test05"),
+        shellcmd="snakemake -c1 --set-resources \"compute1:runtime='50h'\"",
+    )
+
+
+@skip_on_windows  # OS agnostic
+def test_report_dir_but_file():
+    tmpdir = run(dpath("test_report_dir_but_file"), cleanup=False)
+    run(
+        dpath("test_report_dir_but_file"),
+        report="report.html",
+        check_md5=False,
+        shouldfail=True,
+        tmpdir=tmpdir,
+    )
+
+
+@skip_on_windows  # OS agnostic
+def test_call_inner():
+    run(dpath("test_inner_call"))
+
+
+@skip_on_windows  # OS agnostic
+def test_storage_localrule():
+    with tempfile.TemporaryDirectory() as tmpdir:
+        run(
+            dpath("test_storage_localrule"),
+            cluster="./qsub",
+            default_storage_provider="fs",
+            default_storage_prefix="fs-storage",
+            remote_job_local_storage_prefix=Path(tmpdir) / "remotejobs/$JOBID",
+            local_storage_prefix=Path(tmpdir) / "localjobs",
+            shared_fs_usage=[
+                SharedFSUsage.PERSISTENCE,
+                SharedFSUsage.SOURCE_CACHE,
+                SharedFSUsage.SOURCES,
+            ],
+        )
+
+
+@skip_on_windows
+def test_access_patterns():
+    run(
+        dpath("test_access_patterns"),
+        cluster="./sbatch",
+        nodes=1,
+        group_components={"g1": 2},
+        overwrite_groups={"b": "g1", "c": "g1"},
+        default_storage_provider="fs",
+        default_storage_prefix="fs-storage",
+        shared_fs_usage=[
+            SharedFSUsage.PERSISTENCE,
+            SharedFSUsage.SOURCE_CACHE,
+            SharedFSUsage.SOURCES,
+        ],
+    )
+
+
+@skip_on_windows  # OS agnostic
+def test_update_flag():
+    run(dpath("test_update_flag"))
+
+
+def _record_db_sizes(monkeypatch):
+    """Record the size of db.txt handed to the job selector, per rule."""
+    seen = set()
+    job_selector = JobScheduler.job_selector
+
+    def recording_job_selector(self, jobs):
+        """Select jobs and record the db.txt sizes handed to the selector."""
+        selected = job_selector(self, jobs)
+        seen.update(
+            (job.rule.name, self._input_sizes[f])
+            for job in jobs
+            if not job.is_group()
+            for f in job.input
+            if os.path.basename(f) == "db.txt"
+        )
+        return selected
+
+    monkeypatch.setattr(JobScheduler, "job_selector", recording_job_selector)
+    return seen
+
+
+@skip_on_windows  # OS agnostic
+def test_input_sizes_update_flag(monkeypatch):
+    """Input sizes cached for job prioritization are measured again
+    once a job has updated the file
+    """
+    seen = _record_db_sizes(monkeypatch)
+    run(dpath("test_input_sizes_update_flag"))
+    assert seen == {("before", 3), ("after", 6)}
+
+
+@skip_on_windows
+def test_input_sizes_update_flag_group(monkeypatch):
+    """Same as test_input_sizes_update_flag, with the file updated and consumed
+    within a group job, hence not part of the group's outputs
+    """
+    seen = _record_db_sizes(monkeypatch)
+    run(dpath("test_input_sizes_update_flag_group"), cluster="./qsub")
+    assert seen == {("before", 3), ("after", 6)}
+
+
+@skip_on_windows  # OS agnostic
+def test_list_input_changes():
+    run(dpath("test01"), shellcmd="snakemake --list-input-changes", check_results=False)
+
+
+@skip_on_windows  # OS agnostic
+def test_storage_cleanup_local():
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tmpdir_path = Path(tmpdir)
+        run(
+            dpath("test_storage_cleanup_local"),
+            cluster="./qsub",
+            default_storage_provider="fs",
+            default_storage_prefix="fs-storage",
+            local_storage_prefix=tmpdir_path,
+        )
+        assert not tmpdir_path.exists() or not any(tmpdir_path.iterdir())
+
+
+@skip_on_windows
+def test_group_temp():
+    run(dpath("test_group_temp"), cluster="./qsub")
+
+
+@skip_on_windows
+def test_group_temp_notemp():
+    # --notemp has to reach the group job, which handles group-internal temp files
+    run(
+        dpath("test_group_temp_notemp"),
+        shellcmd="snakemake --executor cluster-generic "
+        "--cluster-generic-submit-cmd ./qsub --jobs 1 --notemp",
+    )
+
+
+@skip_on_windows  # OS agnostic
+def test_summary():
+    run(dpath("test01"), shellcmd="snakemake --summary", check_results=False)
+
+
+@skip_on_windows  # OS agnostic
+def test_exists():
+    run(dpath("test_exists"), check_results=False, executor="dryrun")
+
+
+def test_pathvars():
+    run(dpath("test_pathvars"))
+
+
+def test_pathvars_modules():
+    run(dpath("test_pathvars_modules"))
+
+
+def test_pathvars_cycle():
+    run(dpath("test_pathvars_cycle"), shouldfail=True)
+
+
+@skip_on_windows
+def test_pathvars_storage():
+    run(
+        dpath("test_pathvars_storage"),
+        default_storage_provider="fs",
+        default_storage_prefix="storage",
+        cores=1,
+    )
+
+
+@skip_on_windows  # OS agnostic
+def test_handle_storage_multi_consumers():
+    run(
+        dpath("test_handle_storage_multi_consumers"),
+        default_storage_provider="fs",
+        default_storage_prefix="storage",
+        cores=1,
+    )
+
+
+@skip_on_windows  # OS agnostic
+def test_github_issue2732():
+    run(dpath("test_github_issue2732"))
+
+
+def test_default_flags():
+    run(dpath("test_default_flags"), executor="dryrun", check_results=False)
+
+
+def test_update_flag_fail():
+    run(dpath("test_update_flag_fail"), shouldfail=True, check_results=True)
+
+
+def test_update_flag_fail_cleanup():
+    workdir = dpath("test_update_flag_fail_cleanup")
+    tmpdir = run(workdir, shouldfail=True, cleanup=False, check_results=False)
+
+    assert not os.path.exists(os.path.join(tmpdir, "test.txt"))
+    shutil.rmtree(tmpdir, ignore_errors=ON_WINDOWS)
+
+
+@skip_on_windows
+@skip_on_macos
+def test_shell_exec_singularity():
+    run(dpath("test_shell_exec"), deployment_method={"container"})
+
+
+def test_expand_list_of_functions():
+    run(dpath("test_expand_list_of_functions"))
+
+
+@skip_on_windows  # OS agnostic
+def test_scheduler_sequential_all_cores():
+    run(dpath("test_scheduler_sequential_all_cores"), cores=90)
+
+
+@skip_on_windows  # OS agnostic
+def test_checkpoint_open():
+    run(
+        dpath("test_checkpoint_open"),
+        default_storage_provider="fs",
+        default_storage_prefix="storage",
+    )
+
+
+@skip_on_windows  # the fs storage plugin used here shells out to rsync, same as test_checkpoint_open
+def test_checkpoint_running_job_storage_race():
+    """DAG.sanitize_local_storage_copies() must not delete the local storage
+    copy of a job that is still running, e.g. because DAG postprocessing for
+    a concurrently finishing checkpoint is running while that job's own
+    output already exists locally but its completion has not yet been
+    processed by Snakemake. See DAG.is_running()."""
+    run(
+        dpath("test_checkpoint_running_job_storage_race"),
+        cores=4,
+        default_storage_provider="fs",
+        default_storage_prefix="storage",
+    )
+
+
+def test_toposort():
+    run(dpath("test_toposort"), check_results=False, executor="dryrun")
+
+
+@skip_on_windows  # OS agnostic
+def test_failed_intermediate():
+    # see https://github.com/snakemake/snakemake/pull/2966#issuecomment-2558133016
+    # fix was to also write job metadata (persistence.finished(job)) in case of errors
+    path = dpath("test_failed_intermediate")
+    tmpdir = run(path, config={"fail": "init"}, cleanup=False, check_results=False)
+    run(path, config={"fail": "true"}, shouldfail=True, cleanup=False, tmpdir=tmpdir)
+    run(path, config={"fail": "false"}, cleanup=False, tmpdir=tmpdir)
+    shutil.rmtree(tmpdir, ignore_errors=ON_WINDOWS)
+
+
+def test_github_issue2848():
+    # Should fail on parsing with ChildIOException, on Windows previously failed during execution
+    run(
+        dpath("test_github_issue2848"),
+        targets=["output/c.txt", "output/dir2/d.txt"],
+        shouldfail=True,
+    )
+
+
+@pytest.mark.parametrize(
+    "testdir,kwargs",
+    [
+        ("test02", {}),
+        ("test03", {"targets": ["test.out"]}),
+        ("test04", {"targets": ["test.out"]}),
+        ("test06", {"targets": ["test.bla.out"]}),
+        ("test07", {"targets": ["test.out", "test2.out"]}),
+        ("test08", {"targets": ["test.out", "test2.out"]}),
+    ],
+)
+def test_inventory_cache_with_dryrun_first(testdir, kwargs):
+    tmpdir = run(
+        dpath(testdir), executor="dryrun", **kwargs, cleanup=False, check_results=False
+    )
+    run(dpath(testdir), **kwargs, tmpdir=tmpdir, trust_io_cache=True)
+
+
+@skip_on_windows
+@pytest.mark.parametrize(
+    "testdir,kwargs",
+    [
+        ("test01", {}),
+        ("test05", {}),
+    ],
+)
+def test_inventory_cache_with_dryrun_first_skip_on_windows(testdir, kwargs):
+    tmpdir = run(
+        dpath(testdir), executor="dryrun", **kwargs, cleanup=False, check_results=False
+    )
+    run(dpath(testdir), **kwargs, tmpdir=tmpdir, trust_io_cache=True)
+
+
+def test09_inventory_cache_with_dryrun_first_and_fail_second():
+    testdir = "test09"
+    tmpdir = run(dpath(testdir), executor="dryrun", cleanup=False, check_results=False)
+    run(dpath(testdir), tmpdir=tmpdir, trust_io_cache=True, shouldfail=True)
+
+
+@skip_on_windows  # OS agnostic
+def test_issue3338():
+    run(dpath("test_issue3338"), targets=["all"])
+
+
+def test_github_issue_3374():
+    run(dpath("test_github_issue3271"), check_results=False)
+    run(
+        dpath("test_github_issue3271"),
+        snakefile="Snakefile_should_fail",
+        shouldfail=True,
+        check_results=False,
+    )
+
+
+@skip_on_windows  # OS agnostic
+@skip_on_macos  # OS agnostic
+def test_issue3361_pass():
+    run(
+        dpath("test_issue3361_pass"),
+        shellcmd="snakemake --sdm container --cores 1",
+        targets=["all"],
+    )
+
+
+@skip_on_windows
+def test_resource_quoting_profile():
+    run(
+        dpath("test_resource_quoting"),
+        shellcmd="snakemake --executor cluster-generic "
+        "--cluster-generic-submit-cmd ./qsub --jobs 1 --profile test-profile",
+    )
+
+
+@skip_on_windows
+def test_resource_quoting_cli():
+    run(
+        dpath("test_resource_quoting"),
+        shellcmd="snakemake --set-resources \"a:test='foo'\" "
+        "--executor cluster-generic "
+        "--cluster-generic-submit-cmd ./qsub --jobs 1",
+    )
+
+
+@skip_on_windows
+def test_default_resource_quoting_cli():
+    run(
+        dpath("test_resource_quoting"),
+        shellcmd="snakemake --default-resources \"test='foo'\" "
+        "--executor cluster-generic "
+        "--cluster-generic-submit-cmd ./qsub --jobs 1",
+    )
+
+
+@skip_on_windows
+def test_default_resource_quoting_profile():
+    run(
+        dpath("test_resource_quoting"),
+        shellcmd="snakemake --executor cluster-generic "
+        "--cluster-generic-submit-cmd ./qsub --jobs 1 --profile test-profile-default",
+    )
+
+
+@skip_on_windows  # OS agnostic
+def test_issue3361_fail():
+    run(
+        dpath("test_issue3361_fail"),
+        shellcmd="snakemake --sdm container",
+        targets=["all"],
+        shouldfail=True,
+    )
+
+
+@skip_on_windows
+@pytest.mark.skipif(ON_MACOS, reason="MacOS does not support qsub cluster")
+def test_nodelocal():
+    work_path = Path("test_nodelocal")
+    run(
+        dpath(work_path),
+        cluster="./qsub",
+        cores=1,
+        resources={"mem_mb": 120},
+        default_resources=(["mem_mb=120"]),
+    )
+    assert not (work_path / "local/temp.txt").exists() or not any(
+        (work_path / "scratch/").iterdir()
+    )
+
+
+def test_temp_and_all_input():
+    run(dpath("test_temp_and_all_input"))
+
+
+@pytest.mark.skip(
+    reason="Unsupported for now, we would have to maintain the entire github repo on the local disk. "
+    "This can cause race conditions and is quite inefficient on network filesystems. "
+    "Currently, we do a bare checkout of the repo only. "
+    "One way would be a non-bare checkout that could be enabled optionally upon "
+    "snakefile module import."
+)
+def test_python_import_from_github_module():
+    run(dpath("test_python_import_from_github_module"))
+
+
+@skip_on_windows
+def test_keep_local(dummy_server):
+    with tempfile.TemporaryDirectory() as tmpdir:
+        snakefile = os.path.join(dpath("test_local_and_retrieve"), "keep_local.smk")
+        local_img = os.path.join(
+            tmpdir,
+            ".snakemake/storage/http",
+            dummy_server.split("://", 1)[1],
+        )
+
+        p = sp.check_output(
+            ["snakemake", "-s", snakefile, "-c1", "keep_local_default.flag"], cwd=tmpdir
+        )
+        assert not os.path.exists(local_img)
+
+        p = sp.check_output(
+            ["snakemake", "-s", snakefile, "-c1", "keep_local_false.flag"], cwd=tmpdir
+        )
+        assert not os.path.exists(local_img)
+
+        p = sp.check_output(
+            [
+                "snakemake",
+                "-s",
+                snakefile,
+                "-c1",
+                "keep_local_default.flag",
+                "--force",
+                "--keep-storage-local-copies",
+            ],
+            cwd=tmpdir,
+        )
+        assert os.path.exists(local_img)
+        shutil.rmtree(os.path.join(tmpdir, ".snakemake", "storage", "http"))
+
+        p = sp.check_output(
+            ["snakemake", "-s", snakefile, "-c1", "keep_local_true.flag"], cwd=tmpdir
+        )
+        assert os.path.exists(local_img)
+        shutil.rmtree(os.path.join(tmpdir, ".snakemake", "storage", "http"))
+
+        p = sp.check_output(
+            ["snakemake", "-s", snakefile, "-c1", "keep_local_true_directive.flag"],
+            cwd=tmpdir,
+        )
+        assert os.path.exists(local_img.replace("http", "http_local"))
+
+
+@skip_on_windows
+def test_retrieve(dummy_server):
+    with tempfile.TemporaryDirectory() as tmpdir:
+        snakefile = os.path.join(dpath("test_local_and_retrieve"), "retrieve.smk")
+        local_img = os.path.join(
+            tmpdir,
+            ".snakemake/storage/http",
+            dummy_server.split("://", 1)[1],
+        )
+
+        p = sp.check_output(
+            [
+                "snakemake",
+                "-s",
+                snakefile,
+                "-c1",
+                "retrieve_default.flag",
+                "--not-retrieve-storage",
+            ],
+            cwd=tmpdir,
+        )
+        assert not os.path.exists(local_img)
+
+        p = sp.check_output(
+            ["snakemake", "-s", snakefile, "-c1", "retrieve_false.flag"], cwd=tmpdir
+        )
+        assert not os.path.exists(local_img)
+
+        p = sp.check_output(
+            ["snakemake", "-s", snakefile, "-c1", "retrieve_false_directive.flag"],
+            cwd=tmpdir,
+        )
+        assert not os.path.exists(local_img.replace("http", "http_ret"))
+
+        p = sp.check_output(
+            ["snakemake", "-s", snakefile, "-c1", "retrieve_default.flag", "--force"],
+            cwd=tmpdir,
+        )
+        assert os.path.exists(local_img)
+
+        shutil.rmtree(os.path.join(tmpdir, ".snakemake", "storage", "http"))
+
+        p = sp.check_output(
+            ["snakemake", "-s", snakefile, "-c1", "retrieve_true.flag"], cwd=tmpdir
+        )
+        assert os.path.exists(local_img)
+
+
+@skip_on_windows
+def test_censored_path():
+    snakefile = os.path.join(dpath("test_censored_path"), "Snakefile")
+    p = sp.Popen(
+        f"snakemake -s {snakefile} -c1 -n",
+        shell=True,
+        stdout=sp.PIPE,
+        stderr=sp.PIPE,
+    )
+    stdout, stderr = p.communicate()
+    stdout = stdout.decode()
+    assert "my_password" not in stdout
+    assert "param_name" not in stdout
+    assert "param_value" not in stdout
+
+
+def test_params_empty_inherit():
+    run(dpath("test_params_empty_inherit"))
+
+
+@skip_on_windows
+def test_immediate_submit_without_shared_fs():
+    run(
+        dpath("test_immediate_submit_without_shared_fs"),
+        shellcmd="""snakemake \
+        --executor cluster-generic \
+        --cluster-generic-submit-cmd "./clustersubmit --dependencies \\\"{dependencies}\\\"" \
+        --forceall \
+        --immediate-submit \
+        --notemp \
+        --jobs 10 \
+        && ./clustersubmit --execute """,
+    )
+
+
+def test_ambiguousruleexception():
+    path = dpath("test_ambiguousruleexception")
+
+    with prepare_tmpdir(path) as tmpdir:
+        try:
+            run(path, tmpdir=tmpdir)
+        except AmbiguousRuleException:
+            return
+
+    raise AssertionError("This is an ambiguous case! Should have raised an error...")
+
+
+def test_github_issue3556():
+    run(dpath("test_github_issue3556"), shellcmd="snakemake --dag mermaid-js >dag.mmd")
+
+
+@skip_on_windows  # symlinks not properly supported in test framework on windows
+def test_github_issue3687():
+    tmpdir = run(dpath("test_github_issue3687"), cleanup=False)
+    target_file = Path(tmpdir) / "dir2/Done"  # type: ignore[arg-type]
+    shell("rm -rf {tmpdir}/.snakemake/metadata")
+    shell("cp -r {tmpdir}/dir1/D {tmpdir}/")
+    target_file.touch()
+    timestamp = target_file.stat().st_mtime
+    shell("ln -sf ../D {tmpdir}/dir2/")
+    run(dpath("test_github_issue3687"), tmpdir=tmpdir, cleanup=False)
+    assert target_file.stat().st_mtime != timestamp, "input updated, should rerun"
+
+
+@skip_on_windows
+def test_temp_checkpoint():
+    tmpdir = run(dpath("test_temp_checkpoint"), cleanup=False)
+    tmpdir = Path(tmpdir)
+    expected = {
+        tmpdir / "results/aggregated/a.txt",
+        tmpdir / "results/aggregated/b.txt",
+        tmpdir / "results/aggregated/c.txt",
+    }
+    real = set(tmpdir.glob("results/*/*"))
+    assert expected == real, "temp files not removed"
+    shutil.rmtree(tmpdir)
+
+
+def test_checkpoint_until():
+    run(dpath("test_checkpoint_until"), shellcmd="snakemake --until B1 --cores 1")
+
+
+def test_checkpoint_omit_from():
+    run(
+        dpath("test_checkpoint_omit_from"),
+        shellcmd="snakemake --omit-from B1 --cores 1",
+    )
+
+
+def test_wildcard_annotatedstrings():
+    path = dpath("test_wildcard_annotatedstrings")
+    with prepare_tmpdir(path, path.name) as tmpdir:
+        with pytest.raises(
+            WorkflowError, match=r"unpack\(\) is not allowed with params"
+        ):
+            run(path, targets=["test.out"], tmpdir=tmpdir)
+
+
+@skip_on_windows  # platform will have no effect
+def test_cyclic_dependency_split():
+    run(dpath("test_cyclic_dependency_split"))
+
+
+@skip_on_windows  # platform will have no effect
+def test_cyclic_dependency_single():
+    # We force a rerun because the (to be updated) output file is already there
+    # and there is no input file with a newer date.
+    # It is expected behavior that Snakemake would not rerun in such a case without
+    # forcing it.
+    run(dpath("test_cyclic_dependency_single"), forceall=True)
+
+
+@skip_on_windows
+@connected
+@apptainer
+def test_issue3958():
+    run(
+        dpath("test_issue3958"),
+        shellcmd="snakemake --sdm container --sdm-container-runtime apptainer --cores 1",
+        targets=["all"],
+    )
+
+
+def test_stats_table_order_and_counts():
+    # Run snakemake in the example dir and ask it to write stats.txt
+    outdir = run(
+        dpath("test_issue3922"),
+        shellcmd="snakemake --dryrun > stats.txt 2>&1",
+        check_results=False,
+        cleanup=False,
+    )
+    stats_path = os.path.join(outdir, "stats.txt")
+    assert os.path.exists(stats_path), "stats.txt was not created"
+
+    with open(stats_path, "r", encoding="utf-8") as f:
+        txt = f.read()
+    # Extract lines that look like "name <whitespace> number"
+    # Skip header/dashes; match lines with a word-like rule name and integer count
+    pairs = []
+    for line in txt.splitlines():
+        m = re.match(r"^\s*([A-Za-z0-9_]+)\s+(\d+)\s*$", line)
+        if m:
+            name, count = m.group(1), int(m.group(2))
+            pairs.append((name, count))
+
+    # Expected topological order (same-level rules sorted deterministically):
+    # level0: a, b
+    # level1: c (3 instances aggregated), d
+    # level2: e
+    expected_order = ["a", "b", "c", "d", "e", "total"]
+    expected_counts = {"a": 1, "b": 1, "c": 3, "d": 1, "e": 1, "total": 8}
+
+    names = [p[0] for p in pairs]
+    counts = {p[0]: p[1] for p in pairs}
+
+    # Check that all expected names are present in the same order (they may be
+    # surrounded by other formatting lines that don't match the regex)
+    # We check that the subsequence of expected_order appears in names in the same order.
+    idx = 0
+    for expected in expected_order:
+        try:
+            idx = names.index(expected, idx)  # find expected at or after idx
+        except ValueError as e:
+            raise AssertionError(
+                f"Expected rule '{expected}' not found in stats output"
+            ) from e
+        idx += 1
+
+    # Check counts
+    for name, exp_count in expected_counts.items():
+        assert (
+            counts.get(name) == exp_count
+        ), f"Count for {name} was {counts.get(name)} != {exp_count}"
+
+
+def test_github_issue4003():
+    from snakemake.ioutils.as_py_module import format_python_module
+
+    assert (
+        format_python_module("package/subpackage/module.py")
+        == "package.subpackage.module"
+    )
+
+    windows_path = r"package\subpackage\module.py"
+    if ON_WINDOWS:
+        assert format_python_module(windows_path) == "package.subpackage.module"
+    else:
+        with pytest.raises(
+            ValueError,
+            match=re.escape(
+                f"{windows_path} does not translate to a valid Python name"
+            ),
+        ):
+            format_python_module(windows_path)
+
+    for bad_name in [
+        "0package/module.py",
+        "sub-package/module.py",
+        "package/mod-ule.py",
+    ]:
+        if ON_WINDOWS:
+            expect_name = bad_name.replace("/", "\\")
+        else:
+            expect_name = bad_name
+
+        with pytest.raises(
+            ValueError,
+            match=re.escape(f"{expect_name} does not translate to a valid Python name"),
+        ):
+            format_python_module(bad_name)
+
+    with pytest.raises(
+        ValueError, match=re.escape("Only .py files may be run as Python modules.")
+    ):
+        format_python_module("package/module.pyx")
+
+    run(dpath("test_github_issue4003"))
+
+
+@skip_on_windows
+def test_github_issue3913():
+    core_count_limit = 8
+    tmpdir = run(
+        dpath("test_github_issue3913"),
+        shellcmd=f"snakemake --cores {core_count_limit} --scheduler=greedy",
+        cleanup=False,
+    )
+
+    started_job_count = 0
+    completed_job_count = 0
+    active_job_thread_counts = {}
+    with open(next((tmpdir / ".snakemake/log").glob("*.log"))) as logfile:
+        for line in logfile:
+            if line.startswith("    jobid:"):
+                current_jobid = line.split()[-1]
+                thread_count = 1
+            elif line.startswith("    threads"):
+                thread_count = int(line.split()[-1])
+            elif line.startswith("    resources:"):
+                active_job_thread_counts[current_jobid] = thread_count
+                started_job_count += 1
+            elif line.startswith("Finished jobid:"):
+                finished_jobid = line.split()[2]
+                assert finished_jobid in active_job_thread_counts
+                del active_job_thread_counts[finished_jobid]
+                completed_job_count += 1
+
+            if not active_job_thread_counts:
+                # No active jobs trivially passes the test
+                continue
+
+            # At no point in workflow execution
+            # should there be more threads in active jobs than the set limit,
+            # except if a single job requests more threads than the limit
+            active_threads = sum(active_job_thread_counts.values())
+            max_allowed_threads = max(
+                max(active_job_thread_counts.values()),
+                core_count_limit,
+            )
+            assert active_threads <= max_allowed_threads
+
+    # Ensure that we observed every job we expect;
+    # avoid test passing spuriously if log format changes
+    assert completed_job_count == 4 and started_job_count == 4
+    shutil.rmtree(tmpdir, ignore_errors=ON_WINDOWS)
+
+
+def test_module_onstart_onsuccess():
+    run(dpath("test_module_onstart_onsuccess"), check_results=True)
+
+
+def test_module_onstart_not_in_main_snakefile():
+    # check that onstart is not executed, if not in the main snakefile
+    path = dpath("test_module_onstart_not_in_main_snakefile")
+    with prepare_tmpdir(path) as tmpdir:
+        run(
+            path,
+            check_results=True,
+            cleanup=False,
+            tmpdir=tmpdir,
+        )
+        assert not (
+            Path(tmpdir) / "onstart_module1.log"
+        ).exists(), "onstart should not be executed for module1"
+        assert not (
+            Path(tmpdir) / "onstart_module2.log"
+        ).exists(), "onstart should not be executed for module2"
+
+
+def test_module_onerror():
+    run(dpath("test_module_onerror"), shouldfail=True, check_results=True)
+
+
+def test_github_issue672():
+    run(dpath("test_github_issue672"))
+
+
+def test_github_issue2255():
+    run(dpath("test_github_issue2255"), check_results=False)
+
+
+# On Windows this test output is emitted with
+# quotes around the output string what cause these tests to fail
+@skip_on_windows
+def test_github_issue_4039_runtime_cli():
+    """Test that runtime values from CLI are correctly interpreted as minutes, not seconds.
+    Test for https://github.com/snakemake/snakemake/issues/4039"""
+    tmpdir = run(
+        dpath("test_github_issue_4039_runtime_cli"),
+        shellcmd="snakemake -c1 --set-resources 'echo_runtime:runtime=120'",
+        cleanup=False,
+    )
+    shutil.rmtree(tmpdir)
+
+
+@skip_on_windows
+def test_github_issue_4039_mem_cli():
+    """Test that mem values from CLI are correctly interpreted as MB, not bytes.
+    Test for https://github.com/snakemake/snakemake/issues/4039"""
+    tmpdir = run(
+        dpath("test_github_issue_4039_mem_cli"),
+        shellcmd="snakemake -c1 --set-resources 'echo_mem:mem=1024'",
+        cleanup=False,
+    )
+    shutil.rmtree(tmpdir)
+
+
+@skip_on_windows
+def test_github_issue_4039_runtime_profile():
+    """Test that runtime values from a profile are correctly interpreted as minutes, not seconds.
+    Test for https://github.com/snakemake/snakemake/issues/4039"""
+    tmpdir = run(
+        dpath("test_github_issue_4039_runtime_profile"),
+        shellcmd="snakemake -c1 --profile profile/",
+        cleanup=False,
+    )
+    shutil.rmtree(tmpdir)
+
+
+@skip_on_windows
+def test_github_issue_4039_runtime_no_override():
+    """Test the correct processing of times with units or as int/str in the resources directive in the snakefile.
+    Test for https://github.com/snakemake/snakemake/issues/4039"""
+    tmpdir = run(
+        dpath("test_github_issue_4039_runtime_no_override"),
+        shellcmd="snakemake -c1",
+        cleanup=False,
+    )
+    shutil.rmtree(tmpdir)
+
+
+@skip_on_windows
+@connected
+def test_github_issue4376():
+    """Test report generation after workflow including a defined software env (conda).
+    Test for https://github.com/snakemake/snakemake/issues/4376"""
+    run(
+        dpath("test_github_issue4376"),
+        report="report.html",
+        report_after_run=True,
+        check_md5=False,
+        deployment_method={"conda"},
+    )
+
+
+@skip_on_windows
+def test_delete_temp_fs():
+    outdir = run(
+        dpath("test_delete_temp_fs"),
+        shellcmd="snakemake -c1 --default-storage-provider fs",
+        cleanup=False,
+    )
+    temp_file = os.path.join(outdir, "a")
+    assert not os.path.exists(
+        temp_file
+    ), "temp file was not removed in main working directory"
+    shutil.rmtree(outdir)

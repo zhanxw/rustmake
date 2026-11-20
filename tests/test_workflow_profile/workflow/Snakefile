@@ -1,0 +1,10 @@
+rule a:
+    output:
+        "test.out"
+    params:
+        cores=workflow.cores,
+    shell:
+        "echo '{resources.foo}\n"
+        "cores: {params.cores}"
+        "' > {output}"
+
