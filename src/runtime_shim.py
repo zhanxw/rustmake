@@ -33,6 +33,8 @@ os.dup2(2, 1)
 _RPC_OUT = os.fdopen(_RPC_OUT_FD, "w", buffering=1, encoding="utf-8")
 _RPC_IN = os.fdopen(_rpc_in_fd := _RPC_IN_FD, "r", encoding="utf-8")
 sys.stdout = sys.stderr
+if "" not in sys.path:
+    sys.path.insert(0, "")
 
 
 def _rpc_send(obj):

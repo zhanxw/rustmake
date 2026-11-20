@@ -126,15 +126,30 @@ pub struct PyBridge {
     child: Child,
     stdin: ChildStdin,
     stdout: BufReader<ChildStdout>,
+    _shim_path: tempfile::TempPath,
 }
 
 impl PyBridge {
     pub fn spawn() -> Result<Self> {
         let py_bin = find_python_executable();
+        let mut shim_file = tempfile::Builder::new()
+            .prefix("rustmake_shim_")
+            .suffix(".py")
+            .tempfile()
+            .map_err(|e| {
+                RustmakeError::Workflow(format!("Failed to create runtime shim tempfile: {e}"))
+            })?;
+        shim_file.write_all(RUNTIME_SHIM_PY.as_bytes()).map_err(|e| {
+            RustmakeError::Workflow(format!("Failed to write runtime shim tempfile: {e}"))
+        })?;
+        shim_file.flush().map_err(|e| {
+            RustmakeError::Workflow(format!("Failed to flush runtime shim tempfile: {e}"))
+        })?;
+        let shim_path = shim_file.into_temp_path();
+
         let mut child = Command::new(&py_bin)
             .arg("-u")
-            .arg("-c")
-            .arg(RUNTIME_SHIM_PY)
+            .arg(&shim_path)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit())
@@ -160,6 +175,7 @@ impl PyBridge {
             child,
             stdin,
             stdout,
+            _shim_path: shim_path,
         })
     }
 

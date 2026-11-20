@@ -61,6 +61,11 @@ jobs:
         shell: bash
         run: cargo test --locked --test rust_unit_tests --test rust_lint_tests
 
+      - name: Install Python test dependency (numpy) on Unix
+        if: runner.os != 'Windows'
+        shell: bash
+        run: python3 -m pip install --quiet numpy
+
       - name: Run example, workflow, and Python test suites (Unix)
         if: runner.os != 'Windows'
         shell: bash

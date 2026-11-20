@@ -6,7 +6,6 @@ authors = ["Xiaowei Zhan <zhanxw@gmail.com>"]
 description = "A fast, faithful Rust port of the Snakemake workflow management system"
 license = "MIT"
 repository = "https://github.com/zhanxw/rustmake"
-homepage = "https://github.com/zhanxw/rustmake"
 documentation = "https://docs.rs/rustmake"
 readme = "README.md"
 keywords = ["snakemake", "workflow", "bioinformatics", "pipeline", "build-system"]

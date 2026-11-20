@@ -791,20 +791,12 @@ rule make_out:
     let report_html = std::fs::read_to_string(rep_tmp.path().join("report.html")).unwrap();
     assert!(report_html.contains("background: #fafafa"));
 
-    // ZIP report
+    // ZIP report (matches tests/tests.py:305 — outputs are pre-committed in test_report_zip)
     let (zip_tmp, _) = run_case(RunSpec {
-        check_results: false,
+        extra_args: &["--report", "report.zip"],
+        check_md5: false,
         ..RunSpec::simple("test_report_zip")
     });
-    let zip_out = invoke_in_dir(
-        zip_tmp.path(),
-        &RunSpec {
-            extra_args: &["--report", "report.zip"],
-            check_results: false,
-            ..RunSpec::simple("test_report_zip")
-        },
-    );
-    assert!(zip_out.status.success());
     let zip_bytes = std::fs::read(zip_tmp.path().join("report.zip")).unwrap();
     assert!(zip_bytes.starts_with(b"PK\x03\x04"));
 
