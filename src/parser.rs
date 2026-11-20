@@ -225,6 +225,13 @@ fn format_tokens(tokens: &[String]) -> String {
 
 /// Tokenize a Snakefile into a Python-`tokenize`-compatible token stream.
 pub fn tokenize_snakefile(source: &str, path: &str) -> Result<Vec<Token>> {
+    let normalized;
+    let source = if source.contains('\r') {
+        normalized = source.replace("\r\n", "\n").replace('\r', "\n");
+        normalized.as_str()
+    } else {
+        source
+    };
     let chars: Vec<char> = source.chars().collect();
     let n = chars.len();
 
@@ -270,11 +277,7 @@ pub fn tokenize_snakefile(source: &str, path: &str) -> Result<Vec<Token>> {
                 if chars[j] == '\r' && j + 1 < n && chars[j + 1] == '\n' {
                     j += 1;
                 }
-                let nl_text = if j > 0 && chars[j - 1] == '\r' && chars[j] == '\n' {
-                    "\r\n"
-                } else {
-                    "\n"
-                };
+                let nl_text = "\n";
                 let start_col = j - idx;
                 idx = j + 1;
                 tokens.push(Token {

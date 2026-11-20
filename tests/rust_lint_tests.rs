@@ -80,3 +80,25 @@ fn test_parse_all_examples_and_sample_snakefiles() {
         assert!(!parsed.is_empty(), "empty compilation for {p}");
     }
 }
+
+#[test]
+fn test_crlf_snakefile_lint_and_run_block() {
+    let lf_src = std::fs::read_to_string("tests/linting/long_run/positive.smk")
+        .unwrap()
+        .replace("\r\n", "\n");
+    let crlf_src = lf_src.replace('\n', "\r\n");
+
+    let tmp = tempfile::tempdir().unwrap();
+    let smk_path = tmp.path().join("Snakefile");
+    std::fs::write(&smk_path, &crlf_src).unwrap();
+
+    let abs_dir = tmp.path().canonicalize().unwrap();
+    let abs_smk = smk_path.canonicalize().unwrap();
+    let report = lint_workflow(&abs_smk, Some(&abs_dir))
+        .unwrap_or_else(|e| panic!("CRLF lint_workflow failed: {e}"));
+    assert!(
+        !report.linted,
+        "Expected clean lint for CRLF long_run/positive, got: {}",
+        format_lint_report_plain(&report)
+    );
+}
